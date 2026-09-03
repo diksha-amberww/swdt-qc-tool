@@ -65,14 +65,24 @@ export interface QCRowResult {
 
   titleMatchPct: number;
   priceVariancePct: number;
-  imageSimilarityPct: number;
+  imageSimilarityPct: number | null;
   packQtyMatch: boolean | null;
   upcMatch: boolean;
   modelMatch: boolean;
   brandMatch: boolean;
+  /** Always 0 — specs comparison disabled */
   specMatchPct: number;
+  /** Always 0 — description comparison disabled */
   descriptionMatchPct: number;
   titleSameProduct: boolean | null;
+  titleResult?: 'YES' | 'NO' | null;
+  variantConflict?: string | null;
+  packConfidence?: 'SURE' | 'UNSURE' | null;
+  /** Compact fail code for export/UI (BRAND, PACK, VOLUME, …). */
+  failReason?: string;
+  /** Per-field QC outcomes: brand, model, pack size, UPC, image, variant, title. */
+  checks?: { name: string; result: 'yes' | 'no' | 'unknown'; detail: string }[];
+  /** Short one-line log string (not exported as Verdict Sentence). */
   verdictSentence: string;
 
   status: QCStatus;

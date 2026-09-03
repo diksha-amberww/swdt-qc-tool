@@ -142,7 +142,10 @@ export const OutputPage: React.FC = () => {
         const matchAsin = r.asin.toLowerCase().includes(q);
         const matchBrand = (r.brand || '').toLowerCase().includes(q);
         const matchUpc = r.upc.toLowerCase().includes(q);
-        const matchReason = r.aiVerdictReason.toLowerCase().includes(q);
+        const matchReason =
+          (r.failReason || '').toLowerCase().includes(q) ||
+          (r.aiVerdictReason || '').toLowerCase().includes(q) ||
+          (r.variantConflict || '').toLowerCase().includes(q);
         if (!matchModel && !matchAsin && !matchBrand && !matchUpc && !matchReason) {
           return false;
         }
@@ -426,7 +429,7 @@ export const OutputPage: React.FC = () => {
                     <th className="p-3 text-center">Title (AI)</th>
                     <th className="p-3 text-center">Pack Qty</th>
                     <th className="p-3 text-center">UPC Match</th>
-                    <th className="p-3">Verdict</th>
+                    <th className="p-3">Fail Reason</th>
                     <th className="p-3 text-center">Actions</th>
                   </tr>
                 </thead>

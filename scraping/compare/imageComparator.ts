@@ -4,10 +4,18 @@ import type { FetchLike } from '../vendor/seawideHttpClient';
 const IMAGE_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+const CLAUDE_MAX_LONG_EDGE = 512;
+const JPEG_QUALITY = 70;
+
 export interface CompareImage {
   url: string;
   buffer: Buffer;
   dataUrl: string;
+}
+
+export interface ClaudeImagePayload {
+  mediaType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+  base64: string;
 }
 
 type NativeImageModule = typeof import('electron').nativeImage;
@@ -16,29 +24,6 @@ interface PixelGrid {
   bitmap: Buffer;
   width: number;
   height: number;
-}
-
-export async function compareListingImages(
-  vendorUrl: string,
-  amazonUrl: string,
-  fetchImpl?: FetchLike,
-): Promise<number> {
-  if (!vendorUrl || !amazonUrl) return 0;
-  const [vendor, amazon] = await Promise.all([
-    materializeCompareImage(vendorUrl, fetchImpl),
-    materializeCompareImage(amazonUrl),
-  ]);
-  if (!vendor || !amazon) return 0;
-  return compareImageBuffers(vendor.buffer, amazon.buffer);
-}
-
-export async function compareImageBuffers(vendorBuf: Buffer, amazonBuf: Buffer): Promise<number> {
-  try {
-    const { nativeImage } = await import('electron');
-    return scoreImageSimilarity(nativeImage, vendorBuf, amazonBuf);
-  } catch {
-    return 0;
-  }
 }
 
 export async function pickAmazonProductImage(urls: string[]): Promise<CompareImage | null> {
@@ -73,63 +58,48 @@ export async function materializeCompareImage(
   return fetchPublicImage(url);
 }
 
-function scoreImageSimilarity(nativeImage: NativeImageModule, vendorBuf: Buffer, amazonBuf: Buffer): number {
-  const vendorGrid = pixelsOf(nativeImage, vendorBuf, 48, 48);
-  const amazonGrid = pixelsOf(nativeImage, amazonBuf, 48, 48);
-  if (!vendorGrid || !amazonGrid) return 0;
-
-  const vendorContent = contentGrid(vendorGrid);
-  const amazonContent = contentGrid(amazonGrid);
-
-  const dHash = hashSimilarityPct(dHashFromGrid(vendorContent), dHashFromGrid(amazonContent), 64);
-  const aHash = hashSimilarityPct(aHashFromGrid(vendorContent), aHashFromGrid(amazonContent), 64);
-  const color = histogramIntersectionPct(
-    colorHistogram(vendorContent, true),
-    colorHistogram(amazonContent, true),
-  );
-  const raw = Math.min(dHash, aHash, color);
-
-  const vendorLogo = isLikelyLogoGrid(vendorContent);
-  const amazonLogo = isLikelyLogoGrid(amazonContent);
-  if (vendorLogo !== amazonLogo) {
-    return Math.min(raw, 15);
+/** Resize/encode one image for Claude vision without changing compare-image selection. */
+export async function prepareImageForClaude(image: CompareImage | null): Promise<ClaudeImagePayload | null> {
+  if (!image?.buffer?.length) return null;
+  try {
+    const { nativeImage } = await import('electron');
+    return encodeForClaude(nativeImage, image.buffer);
+  } catch {
+    return fallbackEncodeForClaude(image.buffer);
   }
-  return raw;
 }
 
-function isNearWhite(grid: PixelGrid, x: number, y: number): boolean {
-  const i = (y * grid.width + x) * 4;
-  const b = grid.bitmap[i];
-  const g = grid.bitmap[i + 1];
-  const r = grid.bitmap[i + 2];
-  return r >= 245 && g >= 245 && b >= 245;
+function encodeForClaude(nativeImage: NativeImageModule, buffer: Buffer): ClaudeImagePayload | null {
+  const img = nativeImage.createFromBuffer(buffer);
+  if (img.isEmpty()) return null;
+
+  const { width, height } = img.getSize();
+  if (!width || !height) return null;
+
+  const longEdge = Math.max(width, height);
+  let working = img;
+  if (longEdge > CLAUDE_MAX_LONG_EDGE) {
+    const scale = CLAUDE_MAX_LONG_EDGE / longEdge;
+    const targetW = Math.max(1, Math.round(width * scale));
+    const targetH = Math.max(1, Math.round(height * scale));
+    working = img.resize({ width: targetW, height: targetH, quality: 'best' });
+  }
+
+  const bitmap = working.getBitmap();
+  const hasAlpha = bitmap.length >= working.getSize().width * working.getSize().height * 4 &&
+    bitmap.some((byte, index) => index % 4 === 3 && byte < 255);
+  if (hasAlpha) {
+    const png = working.toPNG();
+    return { mediaType: 'image/png', base64: png.toString('base64') };
+  }
+
+  const jpeg = working.toJPEG(JPEG_QUALITY);
+  return { mediaType: 'image/jpeg', base64: jpeg.toString('base64') };
 }
 
-function contentGrid(grid: PixelGrid): PixelGrid {
-  let minX = grid.width;
-  let minY = grid.height;
-  let maxX = -1;
-  let maxY = -1;
-  for (let y = 0; y < grid.height; y += 1) {
-    for (let x = 0; x < grid.width; x += 1) {
-      if (isNearWhite(grid, x, y)) continue;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-    }
-  }
-  if (maxX < minX || maxY < minY) return grid;
-  const width = maxX - minX + 1;
-  const height = maxY - minY + 1;
-  if (width * height < grid.width * grid.height * 0.08) return grid;
-
-  const bitmap = Buffer.alloc(width * height * 4);
-  for (let y = 0; y < height; y += 1) {
-    const srcStart = ((minY + y) * grid.width + minX) * 4;
-    grid.bitmap.copy(bitmap, y * width * 4, srcStart, srcStart + width * 4);
-  }
-  return { bitmap, width, height };
+function fallbackEncodeForClaude(buffer: Buffer): ClaudeImagePayload | null {
+  if (buffer.length < 400) return null;
+  return { mediaType: 'image/jpeg', base64: buffer.toString('base64') };
 }
 
 async function isLikelyLogoImage(buffer: Buffer): Promise<boolean> {
@@ -166,49 +136,47 @@ function pixelsOf(
   return { bitmap, width: size.width, height: size.height };
 }
 
+function contentGrid(grid: PixelGrid): PixelGrid {
+  let minX = grid.width;
+  let minY = grid.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < grid.height; y += 1) {
+    for (let x = 0; x < grid.width; x += 1) {
+      if (isNearWhite(grid, x, y)) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < minX || maxY < minY) return grid;
+  const width = maxX - minX + 1;
+  const height = maxY - minY + 1;
+  if (width * height < grid.width * grid.height * 0.08) return grid;
+
+  const bitmap = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    const srcStart = ((minY + y) * grid.width + minX) * 4;
+    grid.bitmap.copy(bitmap, y * width * 4, srcStart, srcStart + width * 4);
+  }
+  return { bitmap, width, height };
+}
+
+function isNearWhite(grid: PixelGrid, x: number, y: number): boolean {
+  const i = (y * grid.width + x) * 4;
+  const b = grid.bitmap[i];
+  const g = grid.bitmap[i + 1];
+  const r = grid.bitmap[i + 2];
+  return r >= 245 && g >= 245 && b >= 245;
+}
+
 function luminanceAt(grid: PixelGrid, x: number, y: number): number {
   const i = (y * grid.width + x) * 4;
   const b = grid.bitmap[i];
   const g = grid.bitmap[i + 1];
   const r = grid.bitmap[i + 2];
   return 0.299 * r + 0.587 * g + 0.114 * b;
-}
-
-function sampleGrid(grid: PixelGrid, width: number, height: number): number[] {
-  const values: number[] = [];
-  for (let y = 0; y < height; y += 1) {
-    const srcY = Math.min(grid.height - 1, Math.round((y / (height - 1)) * (grid.height - 1)));
-    for (let x = 0; x < width; x += 1) {
-      const srcX = Math.min(grid.width - 1, Math.round((x / (width - 1)) * (grid.width - 1)));
-      values.push(luminanceAt(grid, srcX, srcY));
-    }
-  }
-  return values;
-}
-
-function dHashFromGrid(grid: PixelGrid): bigint {
-  const values = sampleGrid(grid, 9, 8);
-  let hash = 0n;
-  let bit = 0n;
-  for (let y = 0; y < 8; y += 1) {
-    for (let x = 0; x < 8; x += 1) {
-      if (values[y * 9 + x] > values[y * 9 + x + 1]) hash |= 1n << bit;
-      bit += 1n;
-    }
-  }
-  return hash;
-}
-
-function aHashFromGrid(grid: PixelGrid): bigint {
-  const values = sampleGrid(grid, 8, 8);
-  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
-  let hash = 0n;
-  let bit = 0n;
-  for (const value of values) {
-    if (value >= mean) hash |= 1n << bit;
-    bit += 1n;
-  }
-  return hash;
 }
 
 function colorHistogram(grid: PixelGrid, skipWhite = false): number[] {
@@ -245,29 +213,6 @@ function luminanceStats(grid: PixelGrid, skipWhite = false): { mean: number; std
   const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
   const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
   return { mean, stddev: Math.sqrt(variance) };
-}
-
-function histogramIntersectionPct(a: number[], b: number[]): number {
-  let intersection = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    intersection += Math.min(a[i], b[i]);
-  }
-  return Math.round(intersection * 100);
-}
-
-function hashSimilarityPct(a: bigint, b: bigint, bits: number): number {
-  const distance = hammingDistance(a, b);
-  return Math.round(((bits - distance) / bits) * 100);
-}
-
-function hammingDistance(a: bigint, b: bigint): number {
-  let x = a ^ b;
-  let count = 0;
-  while (x) {
-    count += Number(x & 1n);
-    x >>= 1n;
-  }
-  return count;
 }
 
 async function fetchPublicImage(url: string): Promise<CompareImage | null> {

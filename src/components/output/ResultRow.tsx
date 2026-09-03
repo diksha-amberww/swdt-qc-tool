@@ -47,10 +47,9 @@ export const ResultRow: React.FC<ResultRowProps> = memo(({ row, onSelect }) => {
       </td>
 
       <td className="p-3 text-center">
-        <span className={`font-bold ${row.titleSameProduct ? 'text-emerald-700' : 'text-amber-700'}`}>
-          {row.titleSameProduct == null ? '—' : row.titleSameProduct ? 'Same' : 'Different'}
+        <span className={`font-bold ${row.titleResult === 'YES' || row.titleSameProduct ? 'text-emerald-700' : row.titleResult === 'NO' || row.titleSameProduct === false ? 'text-amber-700' : 'text-slate-500'}`}>
+          {row.titleResult ?? (row.titleSameProduct == null ? '—' : row.titleSameProduct ? 'YES' : 'NO')}
         </span>
-        <span className="block text-[10px] text-slate-400">{row.titleMatchPct}% tokens</span>
       </td>
 
       <td className="p-3 text-center">
@@ -69,8 +68,8 @@ export const ResultRow: React.FC<ResultRowProps> = memo(({ row, onSelect }) => {
         </span>
       </td>
 
-      <td className="p-3 max-w-xs truncate text-slate-600 text-[11px]" title={row.verdictSentence || row.aiVerdictReason}>
-        {row.verdictSentence || row.aiVerdictReason}
+      <td className="p-3 text-center font-mono text-[11px] font-bold text-slate-700" title={row.failReason || row.aiVerdictReason || ''}>
+        {row.failReason || (row.status === 'PASSED' ? '—' : row.aiVerdictReason || '—')}
       </td>
 
       <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>

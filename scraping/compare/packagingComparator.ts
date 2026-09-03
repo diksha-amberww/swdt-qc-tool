@@ -20,8 +20,15 @@ export function comparePackaging(
 
   if (vendor.caseQuantity != null && amazon.caseQuantity != null) {
     caseQtyMatch = vendor.caseQuantity === amazon.caseQuantity;
+    if (!caseQtyMatch) {
+      notes.push(
+        `Case quantity differs (contents per case/box): vendor ${vendor.caseQuantity} vs Amazon ${amazon.caseQuantity}`,
+      );
+    }
   } else if (vendor.caseQuantity != null) {
     notes.push(`Vendor case qty ${vendor.caseQuantity}; Amazon case qty not published`);
+  } else if (amazon.caseQuantity != null) {
+    notes.push(`Amazon case qty ${amazon.caseQuantity}; vendor case qty not published`);
   }
 
   if (vendor.unitSize && amazon.unitSize && vendor.unitSize.toLowerCase() !== amazon.unitSize.toLowerCase()) {

@@ -71,6 +71,8 @@ export interface ElectronAPI {
       titleSimilarityThreshold: number;
       imageSimilarityThreshold: number;
       strictPackQuantity: boolean;
+      specMatchThreshold?: number;
+      descriptionMatchThreshold?: number;
     };
   }) => Promise<import('../../scraping/qc/evaluateRow').QcEvaluateResult>;
 }

@@ -116,7 +116,14 @@ export function buildAmazonPackagingProfile(
   push('item_volume', attr(raw, 'item_volume'));
   push('liquid_volume', attr(raw, 'liquid_volume'));
 
-  const packTokenRe = /\b(single|pack of \d+|\d+\s*[- ]?pack)\b/i;
+  // Pack size = COUNT of items delivered. Ounces, fluid ounces, gallons, feet etc.
+  // are contents/size — never pack size.
+  const packTokenRe = /\b(single|pack of \d+|\d+\s*[- ]?pack|\d+\s*[- ]?(count|ct|pcs|pieces))\b/i;
+  // A case/box/carton of N is ONE deliverable container holding N — N is case qty, not pack size.
+  const caseTokenRe = /\b(?:case|box|carton)\s+of\s+(\d+)\b/i;
+  const volumeOrDimRe =
+    /\b(\d+(?:\.\d+)?)\s*(fl\.?\s*oz|oz|ounce|ounces|ml|\bl\b|liter|liters|gal|gallon|gallons|ft|feet|\bin\b|inch|inches|mm|cm)\b/i;
+
   const titlePack = title.match(packTokenRe);
   if (titlePack) {
     signals.push({
@@ -124,6 +131,15 @@ export function buildAmazonPackagingProfile(
       field: 'title',
       rawValue: titlePack[0],
       parsedNumber: parseLeadingNumber(titlePack[0]),
+    });
+  }
+  const titleCase = title.match(caseTokenRe);
+  if (titleCase) {
+    signals.push({
+      source: 'title_token',
+      field: 'case_token',
+      rawValue: titleCase[0],
+      parsedNumber: Number(titleCase[1]) || null,
     });
   }
 
@@ -137,41 +153,126 @@ export function buildAmazonPackagingProfile(
         parsedNumber: parseLeadingNumber(bulletPack[0]),
       });
     }
+    const bulletCase = bullet.match(caseTokenRe);
+    if (bulletCase) {
+      signals.push({
+        source: 'description',
+        field: 'case_token',
+        rawValue: bulletCase[0],
+        parsedNumber: Number(bulletCase[1]) || null,
+      });
+    }
+  }
+
+  // Pack cues often live in Amazon size / size_map ("12 oz (Pack of 3)").
+  for (const sizeField of ['size', 'size_map'] as const) {
+    const sizeVal = flattenAttributeValue(attr(raw, sizeField));
+    if (!sizeVal) continue;
+    const sizePack = sizeVal.match(packTokenRe);
+    if (sizePack) {
+      signals.push({
+        source: 'amazon_attribute',
+        field: `${sizeField}_pack_token`,
+        rawValue: sizePack[0],
+        parsedNumber: parseLeadingNumber(sizePack[0]),
+      });
+    }
   }
 
   profile.rawSignals = signals;
 
   const pkgQty = signals.find((s) => s.field === 'item_package_quantity')?.parsedNumber ?? null;
   const numItems = signals.find((s) => s.field === 'number_of_items')?.parsedNumber ?? null;
-  const titleQty = signals.find((s) => s.source === 'title_token')?.parsedNumber ?? null;
-  const bulletQty = signals.find((s) => s.source === 'description')?.parsedNumber ?? null;
-  const textQty = titleQty ?? bulletQty;
+  const titleQty = signals.find((s) => s.source === 'title_token' && s.field === 'title')?.parsedNumber ?? null;
+  const bulletQty = signals.find((s) => s.source === 'description' && s.field === 'bullet')?.parsedNumber ?? null;
+  const sizePackQty =
+    signals.find((s) => s.field === 'size_pack_token' || s.field === 'size_map_pack_token')?.parsedNumber ?? null;
+  const textQty = titleQty ?? bulletQty ?? sizePackQty;
+  const caseTokenQty = signals.find((s) => s.field === 'case_token')?.parsedNumber ?? null;
+
+  // unit_count is only pack size when its unit is a plain count; "12 Fl Oz" is contents.
+  const unitCountAttr = attr(raw, 'unit_count');
+  const unitCountFirst = Array.isArray(unitCountAttr) ? unitCountAttr[0] : unitCountAttr;
+  const unitCountRec =
+    unitCountFirst && typeof unitCountFirst === 'object'
+      ? (unitCountFirst as Record<string, unknown>)
+      : null;
+  const unitCountNum =
+    parseLeadingNumber(
+      flattenAttributeValue(unitCountRec ? (unitCountRec.value ?? '') : (unitCountAttr ?? '')),
+    ) ?? null;
+  const unitCountUnit = unitCountRec
+    ? flattenAttributeValue(unitCountRec.unit ?? unitCountRec.unit_type ?? '')
+    : '';
+  const unitCountIsCount =
+    unitCountNum != null &&
+    /count|each|\bct\b|\bea\b|piece/i.test(unitCountUnit) &&
+    !/oz|ounce|fl\s*oz|gal|gallon|\bft\b|feet|\bin\b|inch|\blb\b|pound|\bml\b|\bl\b|liter|litre|sheet/i.test(
+      unitCountUnit,
+    );
+
+  const sizeText = flattenAttributeValue(
+    attr(raw, 'size') || attr(raw, 'size_map') || attr(raw, 'item_volume') || attr(raw, 'liquid_volume'),
+  );
+  const volumeOrDimOnly =
+    textQty == null &&
+    pkgQty == null &&
+    numItems == null &&
+    !unitCountIsCount &&
+    (volumeOrDimRe.test(sizeText) ||
+      volumeOrDimRe.test(title) ||
+      Boolean(flattenAttributeValue(attr(raw, 'item_volume'))) ||
+      Boolean(flattenAttributeValue(attr(raw, 'liquid_volume'))));
 
   profile.itemPackageQuantity = pkgQty;
-  // unit_count is contents (oz, sheets), never pack size.
   if (pkgQty != null) {
     profile.unitQuantity = pkgQty;
   } else if (numItems != null && (textQty == null || numItems === textQty)) {
     profile.unitQuantity = numItems;
-  } else {
+  } else if (textQty != null) {
     profile.unitQuantity = textQty;
+  } else if (unitCountIsCount) {
+    profile.unitQuantity = unitCountNum;
+  } else if (caseTokenQty != null) {
+    // "Case/box of N" with no other count signal → one container delivered.
+    profile.unitQuantity = 1;
+  } else if (volumeOrDimOnly) {
+    // fl oz / gallons / feet etc. without Pack of X → pack 1.
+    profile.unitQuantity = 1;
+  } else {
+    // No multipack cue → treat as single (aligned with vendor default).
+    profile.unitQuantity = 1;
   }
 
   const casePack = signals.find((s) => s.field === 'case_pack_quantity')?.parsedNumber ?? null;
-  profile.caseQuantity = casePack != null && casePack > 0 ? casePack : null;
-  profile.unitSize = flattenAttributeValue(attr(raw, 'size') || attr(raw, 'item_volume') || attr(raw, 'liquid_volume')) || null;
+  const resolvedCase = casePack != null && casePack > 0 ? casePack : caseTokenQty;
+  profile.caseQuantity = resolvedCase != null && resolvedCase > 0 ? resolvedCase : null;
+  profile.unitSize =
+    flattenAttributeValue(attr(raw, 'size') || attr(raw, 'item_volume') || attr(raw, 'liquid_volume')) || null;
   profile.unitType = flattenAttributeValue(attr(raw, 'size_map')) || null;
   profile.packDescription =
-    signals.find((s) => s.source === 'title_token' || s.source === 'description')?.rawValue ||
-    (profile.unitQuantity != null ? (profile.unitQuantity === 1 ? 'Single' : `Pack of ${profile.unitQuantity}`) : null);
+    signals.find(
+      (s) =>
+        s.source === 'title_token' ||
+        s.source === 'description' ||
+        s.field === 'size_pack_token' ||
+        s.field === 'size_map_pack_token',
+    )?.rawValue ||
+    (profile.unitQuantity != null
+      ? profile.unitQuantity === 1
+        ? 'Single'
+        : `Pack of ${profile.unitQuantity}`
+      : null);
   profile.isMultipack = profile.unitQuantity != null ? profile.unitQuantity > 1 : null;
 
   if (pkgQty != null && (numItems == null || pkgQty === numItems)) {
     profile.confidence = 'high';
   } else if (numItems != null && textQty != null && numItems === textQty) {
     profile.confidence = 'medium';
-  } else if (profile.unitQuantity != null) {
+  } else if (textQty != null || volumeOrDimOnly) {
     profile.confidence = 'medium';
+  } else if (profile.unitQuantity != null) {
+    profile.confidence = 'low';
   } else if (signals.length > 0) {
     profile.confidence = 'low';
   }

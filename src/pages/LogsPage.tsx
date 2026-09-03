@@ -16,9 +16,21 @@ import {
   ChevronsLeft,
   ChevronsRight,
   X,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { useLogStore } from '../store/useLogStore';
 import { LogLevel, LogCategory } from '../types/log';
+
+function formatLogLine(l: {
+  timestamp: string;
+  level: string;
+  category: string;
+  sku?: string;
+  message: string;
+}): string {
+  return `[${l.timestamp}] [${l.level}] [${l.category}] ${l.sku ? `[SKU: ${l.sku}] ` : ''}${l.message}`;
+}
 
 export const LogsPage: React.FC = () => {
   const {
@@ -37,6 +49,7 @@ export const LogsPage: React.FC = () => {
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(30);
+  const [copied, setCopied] = useState(false);
   const deferredSearch = useDeferredValue(searchQuery);
 
   // Memoized filter to prevent UI render lagging on thousands of logs
@@ -74,12 +87,7 @@ export const LogsPage: React.FC = () => {
     if (format === 'JSON') {
       content = JSON.stringify(logs, null, 2);
     } else {
-      content = logs
-        .map(
-          (l) =>
-            `[${l.timestamp}] [${l.level}] [${l.category}] ${l.sku ? `[SKU: ${l.sku}] ` : ''}${l.message}`
-        )
-        .join('\n');
+      content = logs.map(formatLogLine).join('\n');
     }
 
     const blob = new Blob([content], { type: format === 'JSON' ? 'application/json' : 'text/plain' });
@@ -87,6 +95,18 @@ export const LogsPage: React.FC = () => {
     link.href = URL.createObjectURL(blob);
     link.download = `SWDT_QC_LOGS_${new Date().toISOString().slice(0, 10)}.${format.toLowerCase()}`;
     link.click();
+  };
+
+  const handleCopyVisibleLogs = async () => {
+    const content = filteredLogs.map(formatLogLine).join('\n');
+    if (!content) return;
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable */
+    }
   };
 
   const getLevelBadge = (level: string) => {
@@ -276,16 +296,27 @@ export const LogsPage: React.FC = () => {
       </div>
 
       {/* Logs Terminal Box */}
-      <div className="flex-1 bg-slate-950 text-slate-200 rounded-xl border border-slate-800 shadow-inner overflow-hidden flex flex-col min-h-0 font-mono text-xs">
+      <div className="flex-1 bg-slate-950 text-slate-200 rounded-xl border border-slate-800 shadow-inner overflow-hidden flex flex-col min-h-0 font-mono text-xs select-text">
         {/* Terminal Header */}
-        <div className="px-4 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between text-[11px] text-slate-400 select-none">
-          <div className="flex items-center space-x-2">
+        <div className="px-4 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+          <div className="flex items-center space-x-2 select-none">
             <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" />
             <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block" />
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" />
             <span className="ml-2 font-bold text-slate-300">qc-live-runtime-stream.log</span>
+            <button
+              type="button"
+              onClick={handleCopyVisibleLogs}
+              disabled={filteredLogs.length === 0}
+              title={copied ? 'Copied!' : 'Copy filtered logs'}
+              aria-label={copied ? 'Copied to clipboard' : 'Copy filtered logs'}
+              className="ml-2 inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            >
+              {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+              <span className="font-semibold">{copied ? 'Copied' : 'Copy'}</span>
+            </button>
           </div>
-          <span>
+          <span className="select-none">
             Showing {paginatedLogs.length} of {filteredLogs.length} filtered entries {isStreamingPaused && '(STREAM PAUSED)'}
           </span>
         </div>
@@ -296,13 +327,19 @@ export const LogsPage: React.FC = () => {
             paginatedLogs.map((log) => (
               <div
                 key={log.id}
-                onClick={() => setExpandedLogId(expandedLogId === log.id ? null : log.id)}
-                className="group flex flex-col hover:bg-slate-900/90 px-2 py-1 rounded transition-colors cursor-pointer border-l-2 border-transparent hover:border-blue-500"
+                onClick={() => {
+                  // Don't toggle expand when the user is selecting text to copy
+                  const selection = window.getSelection();
+                  if (selection && selection.toString().length > 0) return;
+                  if (!log.details) return;
+                  setExpandedLogId(expandedLogId === log.id ? null : log.id);
+                }}
+                className="group flex flex-col hover:bg-slate-900/90 px-2 py-1 rounded transition-colors border-l-2 border-transparent hover:border-blue-500"
               >
                 <div className="flex items-start space-x-3">
-                  <span className="text-slate-500 shrink-0 select-none">{log.timestamp}</span>
+                  <span className="text-slate-500 shrink-0">{log.timestamp}</span>
 
-                  <div className="shrink-0">{getLevelBadge(log.level)}</div>
+                  <div className="shrink-0 select-none">{getLevelBadge(log.level)}</div>
 
                   <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-slate-800 text-cyan-300 shrink-0">
                     {log.category}
@@ -327,14 +364,14 @@ export const LogsPage: React.FC = () => {
 
                 {/* Optional expanded details */}
                 {log.details && expandedLogId === log.id && (
-                  <div className="mt-2 ml-16 p-2 rounded bg-black/60 border border-slate-800 text-slate-400 text-[11px] overflow-x-auto">
+                  <div className="mt-2 ml-16 p-2 rounded bg-black/60 border border-slate-800 text-slate-400 text-[11px] overflow-x-auto select-text">
                     <pre>{typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}</pre>
                   </div>
                 )}
               </div>
             ))
           ) : (
-            <div className="h-full flex items-center justify-center text-slate-600">
+            <div className="h-full flex items-center justify-center text-slate-600 select-none">
               No matching log entries found for current filters.
             </div>
           )}

@@ -136,7 +136,7 @@ const DEFAULT_CREDENTIALS: AppCredentialsState = {
   },
   claude: {
     apiKey: '',
-    model: 'claude-haiku-4.5',
+    model: 'claude-haiku-4-5',
     endpointUrl: 'https://api.anthropic.com/v1/messages',
     isConnected: false,
     lastTestedAt: undefined,
@@ -192,7 +192,7 @@ export const useCredStore = create<CredStoreState>((set, get) => ({
             claude: {
               ...state.credentials.claude,
               apiKey: '',
-              model: 'claude-haiku-4.5',
+              model: 'claude-haiku-4-5',
             },
             email: {
               ...state.credentials.email,
@@ -341,7 +341,7 @@ export const useCredStore = create<CredStoreState>((set, get) => ({
 
     if (section === 'ALL' || section === 'CLAUDE') {
       if (creds.claude.apiKey) envPayload.ANTHROPIC_API_KEY = creds.claude.apiKey;
-      envPayload.ANTHROPIC_MODEL = 'claude-haiku-4.5';
+      envPayload.ANTHROPIC_MODEL = 'claude-haiku-4-5';
     }
 
     if (section === 'ALL' || section === 'EMAIL') {
@@ -642,7 +642,7 @@ export const useCredStore = create<CredStoreState>((set, get) => ({
         details: {
           endpoint: 'https://api.anthropic.com/v1/messages',
           responseTimeMs: elapsed,
-          authScope: 'claude-haiku-4.5 inference tier',
+          authScope: 'claude-haiku-4-5 inference tier',
           rateLimitRemaining: '2,000 RPM / 160,000 TPM active',
           accountStatus: 'Tier 3 Active Organization ($200 credit balance)',
         },

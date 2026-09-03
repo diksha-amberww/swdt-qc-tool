@@ -209,7 +209,7 @@ export const ExportPage: React.FC = () => {
                   <th className="p-2.5">Price (Vendor vs AMZ)</th>
                   <th className="p-2.5">Price Var %</th>
                   <th className="p-2.5">Pack Match</th>
-                  <th className="p-2.5">Verdict</th>
+                  <th className="p-2.5">Fail Reason</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -239,7 +239,7 @@ export const ExportPage: React.FC = () => {
                       {r.priceVariancePct > 0 ? `+${r.priceVariancePct}%` : `${r.priceVariancePct}%`}
                     </td>
                     <td className="p-2.5 text-slate-600">{r.packQtyMatch == null ? '—' : r.packQtyMatch ? 'Yes' : 'No'}</td>
-                    <td className="p-2.5 max-w-xs truncate text-slate-500 text-[11px]">{r.verdictSentence || r.aiVerdictReason}</td>
+                    <td className="p-2.5 font-mono text-[11px] font-bold text-slate-700">{r.failReason || '—'}</td>
                   </tr>
                 ))}
               </tbody>

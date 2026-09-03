@@ -11,6 +11,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   priceVarianceThreshold: 15,
   titleSimilarityThreshold: 70,
   imageSimilarityThreshold: 50,
+  specMatchThreshold: 70,
+  descriptionMatchThreshold: 70,
   reuseSession: true,
   headlessMode: true,
   strictPackQuantity: true,

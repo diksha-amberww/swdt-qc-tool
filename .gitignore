@@ -29,3 +29,5 @@ coverage/
 
 # Electron / Vite cache
 .vite/
+
+exports/

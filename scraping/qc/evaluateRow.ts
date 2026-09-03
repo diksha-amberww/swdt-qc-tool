@@ -7,8 +7,20 @@ import type { FetchLike } from '../vendor/seawideHttpClient';
 import { fetchAmazonListing } from '../amazon/amazonSpApiEngine';
 import { resolveAmazonCredentials, type AmazonCredentials } from '../amazon/amazonTokenProvider';
 import { buildRowComparisonPayload } from '../compare/listingNormalizer';
-import { compareImageBuffers, materializeCompareImage, pickAmazonProductImage } from '../compare/imageComparator';
-import { compareTitlesWithAi } from '../compare/titleAiComparator';
+import {
+  materializeCompareImage,
+  pickAmazonProductImage,
+  prepareImageForClaude,
+  type ClaudeImagePayload,
+} from '../compare/imageComparator';
+import {
+  applyClaudePackSizes,
+  compareListingsWithClaude,
+  type ClaudeQcResult,
+  type VariantConflict,
+} from '../ai/claudeQcComparator';
+import { buildAmazonEvidenceBlock, buildVendorEvidenceBlock } from '../ai/qcEvidenceBuilder';
+import { modelMatchDetail } from '../compare/modelComparator';
 import { resolveClaudeCredentials } from '../ai/claudeCredentials';
 import { emptyComparisonProfile } from '../types/comparisonProfile';
 import { emptyVendorRawListing } from '../types/vendorListing';
@@ -16,15 +28,32 @@ import { emptyAmazonRawListing } from '../types/amazonListing';
 
 export type QcStatus = 'PASSED' | 'FAILED' | 'MANUAL REVIEW';
 
-export const SPEC_MATCH_THRESHOLD = 70;
-export const DESCRIPTION_MATCH_THRESHOLD = 70;
-export const TITLE_AI_HIGH_CONFIDENCE = 0.75;
+export type FailReasonCode =
+  | ''
+  | 'BRAND'
+  | 'MODEL'
+  | 'PACK'
+  | 'QTY_UNSURE'
+  | 'UPC'
+  | 'IMAGE'
+  | 'SIZE'
+  | 'VOLUME'
+  | 'AGE'
+  | 'VOLTAGE'
+  | 'COLOR'
+  | 'PRODUCT'
+  | 'TITLE'
+  | 'SCRAPE';
 
 export interface QcEvaluateSettings {
   priceVarianceThreshold: number;
   titleSimilarityThreshold: number;
   imageSimilarityThreshold: number;
   strictPackQuantity: boolean;
+  /** @deprecated unused — specs no longer scored */
+  specMatchThreshold?: number;
+  /** @deprecated unused — description no longer scored */
+  descriptionMatchThreshold?: number;
 }
 
 export interface SlimListingDetails {
@@ -54,14 +83,22 @@ export interface QcEvaluateResult {
   comparisonPayload: RowComparisonPayload | null;
   titleMatchPct: number;
   priceVariancePct: number;
-  imageSimilarityPct: number;
+  imageSimilarityPct: number | null;
   packQtyMatch: boolean | null;
   upcMatch: boolean;
   modelMatch: boolean;
   brandMatch: boolean;
+  /** Always 0 — specs comparison disabled */
   specMatchPct: number;
+  /** Always 0 — description comparison disabled */
   descriptionMatchPct: number;
   titleSameProduct: boolean | null;
+  titleResult: 'YES' | 'NO' | null;
+  variantConflict: VariantConflict | null;
+  packConfidence: 'SURE' | 'UNSURE' | null;
+  checks: QcFieldCheckResult[];
+  failReason: FailReasonCode;
+  /** Short one-line log string (not exported) */
   verdictSentence: string;
   status: QcStatus;
   aiVerdictReason: string;
@@ -73,11 +110,15 @@ export interface QcEvaluateResult {
 
 type CheckResult = 'yes' | 'no' | 'unknown';
 
-interface FieldCheck {
+export interface QcFieldCheckResult {
   name: string;
   result: CheckResult;
-  failOnNo: boolean;
   detail: string;
+}
+
+interface FieldCheck extends QcFieldCheckResult {
+  failOnNo: boolean;
+  failCode?: FailReasonCode;
 }
 
 function slimFromVendor(listing: VendorListingJson | null, fallbackUpc: string, fallbackModel: string): SlimListingDetails {
@@ -172,33 +213,42 @@ function formatQty(value: number | null | undefined): string {
   return value == null ? 'unpublished' : String(value);
 }
 
-function buildVerdictSentence(checks: FieldCheck[], status: QcStatus, scrapeErrors: string[]): string {
-  if (scrapeErrors.length) {
-    return `Could not finish comparison: ${scrapeErrors.join(' ')}`;
-  }
-  if (status === 'PASSED') {
-    return 'Core fields match: brand, model, pack size, UPC, image, and titles represent the same product.';
-  }
-  const failed = checks.filter((c) => c.result === 'no');
-  const unknown = checks.filter((c) => c.result === 'unknown');
-  const matched = checks.filter((c) => c.result === 'yes').map((c) => c.name);
-  const parts: string[] = [];
-  if (failed.length) parts.push(failed.map((c) => c.detail).join(' '));
-  if (unknown.length) parts.push(unknown.map((c) => c.detail).join(' '));
-  if (matched.length) parts.push(`Matched: ${matched.join(', ')}.`);
-  return parts.join(' ') || 'Comparison is incomplete.';
-}
-
-const CORE_CHECK_NAMES = new Set(['brand', 'model', 'pack size', 'UPC', 'image', 'title']);
-
 function resolveStatus(checks: FieldCheck[], scrapeErrors: string[]): QcStatus {
   if (scrapeErrors.length) return 'MANUAL REVIEW';
   if (checks.some((c) => c.result === 'no' && c.failOnNo)) return 'FAILED';
-  const core = checks.filter((c) => CORE_CHECK_NAMES.has(c.name));
-  if (core.some((c) => c.result === 'no')) return 'MANUAL REVIEW';
-  if (core.some((c) => c.result === 'unknown')) return 'MANUAL REVIEW';
-  if (core.every((c) => c.result === 'yes')) return 'PASSED';
-  return 'MANUAL REVIEW';
+  if (checks.some((c) => c.result === 'no')) return 'MANUAL REVIEW';
+  if (checks.some((c) => c.result === 'unknown')) return 'MANUAL REVIEW';
+  return 'PASSED';
+}
+
+function buildFailReason(
+  checks: FieldCheck[],
+  status: QcStatus,
+  scrapeErrors: string[],
+): FailReasonCode {
+  if (scrapeErrors.length) return 'SCRAPE';
+  if (status === 'PASSED') return '';
+
+  const hardFail = checks.find((c) => c.result === 'no' && c.failOnNo && c.failCode);
+  if (hardFail?.failCode) return hardFail.failCode;
+
+  const soft = checks.find((c) => (c.result === 'no' || c.result === 'unknown') && c.failCode);
+  if (soft?.failCode) return soft.failCode;
+
+  return 'PRODUCT';
+}
+
+function buildLogSentence(status: QcStatus, failReason: FailReasonCode, scrapeErrors: string[]): string {
+  if (scrapeErrors.length) return `Could not finish comparison: ${scrapeErrors.join(' ')}`;
+  if (status === 'PASSED') return 'PASSED';
+  if (failReason) return `${status}: ${failReason}`;
+  return status;
+}
+
+function titleCheckDetail(titleResult: 'YES' | 'NO' | null): string {
+  if (titleResult === 'YES') return 'Titles represent the same product (AI: YES).';
+  if (titleResult === 'NO') return 'Titles do not represent the same product (AI: NO).';
+  return 'Title comparison was not completed by AI.';
 }
 
 export async function evaluateQcRow(
@@ -228,8 +278,62 @@ export async function evaluateQcRow(
 
   const vendor = vendorResult.listing || placeholderVendor(input);
   const amazon = amazonResult.listing || placeholderAmazon(input.asin, amazonCreds.marketplaceId);
-  const comparisonPayload: RowComparisonPayload | null =
-    vendorResult.listing && amazonResult.listing ? buildRowComparisonPayload(vendor, amazon) : null;
+
+  let claudeQc: ClaudeQcResult | null = null;
+  let vendorClaudeImage: ClaudeImagePayload | null = null;
+  let amazonClaudeImage: ClaudeImagePayload | null = null;
+  const bothListingsFetched = Boolean(vendorResult.listing && amazonResult.listing);
+
+  if (bothListingsFetched) {
+    const vendorSlimForImages = slimFromVendor(vendor, input.upc, input.vendorModel);
+    const amazonSlimForImages = slimFromAmazon(amazon);
+
+    const [vendorImage, amazonImage] = await Promise.all([
+      materializeCompareImage(vendorSlimForImages.imageUrl, options.fetchImpl),
+      pickAmazonProductImage(
+        amazon.normalized.media.images.length
+          ? amazon.normalized.media.images
+          : amazonSlimForImages.imageUrl
+            ? [amazonSlimForImages.imageUrl]
+            : [],
+      ),
+    ]);
+
+    [vendorClaudeImage, amazonClaudeImage] = await Promise.all([
+      prepareImageForClaude(vendorImage),
+      prepareImageForClaude(amazonImage),
+    ]);
+
+    claudeQc = await compareListingsWithClaude(
+      {
+        vendorEvidence: buildVendorEvidenceBlock(vendor),
+        amazonEvidence: buildAmazonEvidenceBlock(amazon),
+        vendorTitle: vendor.title,
+        amazonTitle: amazon.title,
+        vendorImage: vendorClaudeImage,
+        amazonImage: amazonClaudeImage,
+      },
+      claudeCreds,
+    );
+
+    if (claudeQc.error) {
+      errors.push(claudeQc.error);
+    }
+
+    // Only overwrite parser pack sizes when AI is confident.
+    if (
+      claudeQc.packConfidence === 'SURE' &&
+      claudeQc.vendorPackSize != null &&
+      claudeQc.amazonPackSize != null &&
+      !claudeQc.skipped
+    ) {
+      applyClaudePackSizes(vendor, amazon, claudeQc.vendorPackSize, claudeQc.amazonPackSize);
+    }
+  }
+
+  const comparisonPayload: RowComparisonPayload | null = bothListingsFetched
+    ? buildRowComparisonPayload(vendor, amazon)
+    : null;
 
   const identity = comparisonPayload?.comparison.identity;
   const packaging = comparisonPayload?.comparison.packaging;
@@ -238,48 +342,82 @@ export async function evaluateQcRow(
   const amazonSlim = slimFromAmazon(amazon);
   const variance = priceVariancePct(vendorSlim.price, amazonSlim.price);
 
-  const [vendorImage, amazonImage, titleAi] = await Promise.all([
-    materializeCompareImage(vendorSlim.imageUrl, options.fetchImpl),
-    pickAmazonProductImage(amazon.normalized.media.images.length
-      ? amazon.normalized.media.images
-      : amazonSlim.imageUrl
-        ? [amazonSlim.imageUrl]
-        : []),
-    compareTitlesWithAi(vendorSlim.title, amazonSlim.title, claudeCreds, {
-      vendorBrand: vendor.brand,
-      amazonBrand: amazon.brand,
-      vendorModel: vendor.modelNumber,
-      amazonModel: amazon.modelNumber,
-    }),
-  ]);
-
-  if (vendorImage) vendorSlim.imageUrl = vendorImage.dataUrl;
-  if (amazonImage) amazonSlim.imageUrl = amazonImage.url;
-  const imageSimilarityPct =
-    vendorImage && amazonImage ? await compareImageBuffers(vendorImage.buffer, amazonImage.buffer) : 0;
+  const titleResult = claudeQc?.titleResult ?? null;
+  const titleSameProduct =
+    titleResult === 'YES' ? true : titleResult === 'NO' ? false : null;
+  const bothImagesReady = Boolean(vendorClaudeImage && amazonClaudeImage);
+  // Ignore AI image % when either side lacked a usable Claude image.
+  const imageSimilarityPct = bothImagesReady ? (claudeQc?.imageSimilarityPct ?? null) : null;
+  const packConfidence = claudeQc?.packConfidence ?? null;
+  const variantConflict = claudeQc?.variantConflict ?? null;
 
   if (comparisonPayload) {
-    comparisonPayload.comparison.identity.titleSameProduct = titleAi.sameProduct;
-    comparisonPayload.comparison.identity.titleAiConfidence = titleAi.confidence;
-    comparisonPayload.comparison.identity.titleAiReason = titleAi.reason;
+    comparisonPayload.comparison.identity.titleSameProduct = titleSameProduct;
+    comparisonPayload.comparison.identity.titleAiConfidence = 0;
+    comparisonPayload.comparison.identity.titleAiReason = titleCheckDetail(titleResult);
   }
 
   const brandPresent = Boolean(vendor.brand && amazon.brand);
   const brandMatch = identity?.brandMatch ?? false;
   const modelPresent = Boolean(vendor.modelNumber && amazon.modelNumber);
-  const modelMatch = identity?.modelMatch ?? false;
+  const modelDetail = modelMatchDetail(vendor.modelNumber || '', amazon.modelNumber || '');
+  const modelMatch = modelPresent && modelDetail.match;
   const packQtyMatch = packaging?.unitQtyMatch ?? null;
   const upcMatch = identifiers?.upcMatch ?? false;
-  const specMatchPct = comparisonPayload?.comparison.specifications.matchPct ?? 0;
-  const descriptionMatchPct = comparisonPayload?.comparison.content.descriptionMatchPct ?? 0;
-  const specOverlap = comparisonPayload?.comparison.specifications.overlappingKeys.length ?? 0;
   const titleMatchPct = identity?.titleSimilarityPct ?? 0;
+
+  const packUnsure = packConfidence === 'UNSURE';
+  let packResult: CheckResult;
+  let packFailOnNo: boolean;
+  let packFailCode: FailReasonCode | undefined;
+  let packDetail: string;
+
+  if (packUnsure) {
+    packResult = 'unknown';
+    packFailOnNo = false;
+    packFailCode = 'QTY_UNSURE';
+    packDetail = `Pack quantity unsure (AI: UNSURE; vendor ${formatQty(vendorSlim.packQuantity)}, Amazon ${formatQty(amazonSlim.packQuantity)}).`;
+  } else if (packQtyMatch == null) {
+    packResult = 'unknown';
+    packFailOnNo = false;
+    packFailCode = 'QTY_UNSURE';
+    packDetail = `Pack size is unpublished on one or both listings (vendor ${formatQty(vendorSlim.packQuantity)}, Amazon ${formatQty(amazonSlim.packQuantity)}).`;
+  } else if (packQtyMatch) {
+    packResult = 'yes';
+    packFailOnNo = options.settings.strictPackQuantity;
+    packDetail = `Pack size matches (vendor ${vendorSlim.packQuantity}, Amazon ${amazonSlim.packQuantity}).`;
+  } else {
+    packResult = 'no';
+    packFailOnNo = options.settings.strictPackQuantity;
+    packFailCode = 'PACK';
+    packDetail = `Pack size differs (vendor ${vendorSlim.packQuantity} vs Amazon ${amazonSlim.packQuantity}).`;
+  }
+
+  const variantPresent = variantConflict != null;
+  const variantIsConflict = variantPresent && variantConflict !== 'NONE';
+
+  let imageResult: CheckResult;
+  let imageDetail: string;
+  if (!bothImagesReady) {
+    imageResult = 'no';
+    imageDetail = 'Vendor/Amazon compare image unavailable.';
+  } else if (imageSimilarityPct == null) {
+    imageResult = 'unknown';
+    imageDetail = 'Image similarity was not completed by AI.';
+  } else if (imageSimilarityPct >= imageThreshold) {
+    imageResult = 'yes';
+    imageDetail = `Images match (${imageSimilarityPct}% ≥ ${imageThreshold}%).`;
+  } else {
+    imageResult = 'no';
+    imageDetail = `Images are below ${imageThreshold}% similarity (${imageSimilarityPct}%).`;
+  }
 
   const checks: FieldCheck[] = [
     {
       name: 'brand',
       result: !brandPresent ? 'unknown' : brandMatch ? 'yes' : 'no',
       failOnNo: true,
+      failCode: 'BRAND',
       detail: !brandPresent
         ? 'Brand is missing on one or both listings.'
         : brandMatch
@@ -289,28 +427,26 @@ export async function evaluateQcRow(
     {
       name: 'model',
       result: !modelPresent ? 'unknown' : modelMatch ? 'yes' : 'no',
-      failOnNo: false,
+      failOnNo: true,
+      failCode: 'MODEL',
       detail: !modelPresent
         ? 'Model number is missing on one or both listings.'
         : modelMatch
-          ? `Model matches (${vendor.modelNumber}).`
+          ? `Model matches (${vendor.modelNumber} ↔ ${amazon.modelNumber}, ${modelDetail.reason}).`
           : `Model numbers differ: ${vendor.modelNumber} vs ${amazon.modelNumber}.`,
     },
     {
       name: 'pack size',
-      result: packQtyMatch == null ? 'unknown' : packQtyMatch ? 'yes' : 'no',
-      failOnNo: options.settings.strictPackQuantity,
-      detail:
-        packQtyMatch == null
-          ? `Pack size is unpublished on one or both listings (vendor ${formatQty(vendorSlim.packQuantity)}, Amazon ${formatQty(amazonSlim.packQuantity)}). Case qty is not pack size.`
-          : packQtyMatch
-            ? `Pack size matches (${vendorSlim.packQuantity}).`
-            : `Pack size differs (vendor ${vendorSlim.packQuantity} vs Amazon ${amazonSlim.packQuantity}).`,
+      result: packResult,
+      failOnNo: packFailOnNo,
+      failCode: packFailCode,
+      detail: packDetail,
     },
     {
       name: 'UPC',
       result: !identifiers?.upcAmazon && !amazon.upc ? 'unknown' : upcMatch ? 'yes' : 'no',
       failOnNo: true,
+      failCode: 'UPC',
       detail: upcMatch
         ? `UPC matches Amazon ${identifiers?.matchedAmazonIdentifier?.type || 'identifier'} ${identifiers?.upcAmazon || amazon.upc}.`
         : !amazon.upc && !identifiers?.upcAmazon
@@ -319,54 +455,35 @@ export async function evaluateQcRow(
     },
     {
       name: 'image',
-      result: !vendorSlim.imageUrl || !amazonSlim.imageUrl
-        ? 'unknown'
-        : imageSimilarityPct >= imageThreshold
-          ? 'yes'
-          : 'no',
-      failOnNo: false,
-      detail: !vendorSlim.imageUrl || !amazonSlim.imageUrl
-        ? 'One or both listings are missing a compare image.'
-        : imageSimilarityPct >= imageThreshold
-          ? `Images match (${imageSimilarityPct}% ≥ ${imageThreshold}%).`
-          : `Images are below ${imageThreshold}% similarity (${imageSimilarityPct}%).`,
+      result: imageResult,
+      failOnNo: true,
+      failCode: 'IMAGE',
+      detail: imageDetail,
     },
     {
-      name: 'specs',
-      result: specOverlap === 0 ? 'unknown' : specMatchPct >= SPEC_MATCH_THRESHOLD ? 'yes' : 'no',
-      failOnNo: false,
-      detail: specOverlap === 0
-        ? 'No overlapping specification keys to compare.'
-        : specMatchPct >= SPEC_MATCH_THRESHOLD
-          ? `Specs match ${specMatchPct}% (≥ ${SPEC_MATCH_THRESHOLD}%).`
-          : `Specs match ${specMatchPct}%, below ${SPEC_MATCH_THRESHOLD}%.`,
-    },
-    {
-      name: 'description',
-      result: descriptionMatchPct <= 0 ? 'unknown' : descriptionMatchPct >= DESCRIPTION_MATCH_THRESHOLD ? 'yes' : 'no',
-      failOnNo: false,
-      detail: descriptionMatchPct <= 0
-        ? 'Description text is missing on one or both listings.'
-        : descriptionMatchPct >= DESCRIPTION_MATCH_THRESHOLD
-          ? `Description match ${descriptionMatchPct}% (≥ ${DESCRIPTION_MATCH_THRESHOLD}%).`
-          : `Description match ${descriptionMatchPct}%, below ${DESCRIPTION_MATCH_THRESHOLD}%.`,
+      name: 'variant',
+      result: !variantPresent ? 'unknown' : variantIsConflict ? 'no' : 'yes',
+      failOnNo: true,
+      failCode: variantIsConflict ? (variantConflict as FailReasonCode) : undefined,
+      detail: !variantPresent
+        ? 'Variant conflict check was not completed by AI.'
+        : variantIsConflict
+          ? `Variant conflict: ${variantConflict}.`
+          : 'No variant conflict (AI: NONE).',
     },
     {
       name: 'title',
-      result: titleAi.sameProduct == null
-        ? 'unknown'
-        : titleAi.sameProduct
-          ? 'yes'
-          : 'no',
-      failOnNo: titleAi.sameProduct === false && titleAi.confidence >= TITLE_AI_HIGH_CONFIDENCE,
-      detail: titleAi.reason,
+      result: titleResult == null ? 'unknown' : titleResult === 'YES' ? 'yes' : 'no',
+      failOnNo: titleResult === 'NO',
+      failCode: 'TITLE',
+      detail: titleCheckDetail(titleResult),
     },
   ];
 
   const status = resolveStatus(checks, errors);
-  const verdictSentence = buildVerdictSentence(checks, status, errors);
-  const confidence =
-    status === 'PASSED' ? 0.92 : status === 'FAILED' ? 0.88 : 0.55;
+  const failReason = buildFailReason(checks, status, errors);
+  const verdictSentence = buildLogSentence(status, failReason, errors);
+  const confidence = status === 'PASSED' ? 0.92 : status === 'FAILED' ? 0.88 : 0.55;
 
   return {
     id: `qc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -384,17 +501,22 @@ export async function evaluateQcRow(
     titleMatchPct,
     priceVariancePct: variance,
     imageSimilarityPct,
-    packQtyMatch,
+    packQtyMatch: packUnsure ? null : packQtyMatch,
     upcMatch,
     modelMatch,
     brandMatch,
-    specMatchPct,
-    descriptionMatchPct,
-    titleSameProduct: titleAi.sameProduct,
+    specMatchPct: 0,
+    descriptionMatchPct: 0,
+    titleSameProduct,
+    titleResult,
+    variantConflict,
+    packConfidence,
+    checks: checks.map(({ name, result, detail }) => ({ name, result, detail })),
+    failReason,
     verdictSentence,
     status,
-    aiVerdictReason: verdictSentence,
-    aiTokensUsed: titleAi.tokensUsed,
+    aiVerdictReason: failReason || verdictSentence,
+    aiTokensUsed: claudeQc?.tokensUsed ?? { input: 0, output: 0 },
     confidenceScore: confidence,
     timestamp: new Date().toLocaleTimeString(),
     errors,

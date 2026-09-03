@@ -35,6 +35,11 @@ function toQcRowResult(evaluated: QcEvaluateResult): QCRowResult {
     specMatchPct: evaluated.specMatchPct,
     descriptionMatchPct: evaluated.descriptionMatchPct,
     titleSameProduct: evaluated.titleSameProduct,
+    titleResult: evaluated.titleResult,
+    variantConflict: evaluated.variantConflict,
+    packConfidence: evaluated.packConfidence,
+    failReason: evaluated.failReason,
+    checks: evaluated.checks,
     verdictSentence: evaluated.verdictSentence,
     status: evaluated.status,
     aiVerdictReason: evaluated.aiVerdictReason,
@@ -124,6 +129,8 @@ export class QcEngine {
         titleSimilarityThreshold: settings.titleSimilarityThreshold,
         imageSimilarityThreshold: settings.imageSimilarityThreshold,
         strictPackQuantity: settings.strictPackQuantity,
+        specMatchThreshold: settings.specMatchThreshold,
+        descriptionMatchThreshold: settings.descriptionMatchThreshold,
       },
     };
 

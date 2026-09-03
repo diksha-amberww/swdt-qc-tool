@@ -109,6 +109,8 @@ if (!asin || !vendorModel) {
         titleSimilarityThreshold: payload.settings?.titleSimilarityThreshold ?? 70,
         imageSimilarityThreshold: payload.settings?.imageSimilarityThreshold ?? 50,
         strictPackQuantity: payload.settings?.strictPackQuantity ?? true,
+        specMatchThreshold: payload.settings?.specMatchThreshold ?? 70,
+        descriptionMatchThreshold: payload.settings?.descriptionMatchThreshold ?? 70,
       };
 
       const result = await evaluateQcRow(

@@ -3,18 +3,13 @@ import type { VendorListingJson } from '../types/vendorListing';
 import type { IdentityComparison, RowComparisonPayload } from '../types/scrapeResult';
 import { comparePackaging } from './packagingComparator';
 import { compareUpcAnyMatch } from './upcAnyMatch';
-import { compareDescriptions, compareSpecifications } from './contentComparator';
 import { titleSimilarityPct } from './textSimilarity';
 import { brandsMatch } from './brandComparator';
+import { modelsMatch } from './modelComparator';
 
 export { titleSimilarityPct } from './textSimilarity';
 export { brandsMatch };
-
-function modelsMatch(vendorModel: string, amazonModel: string): boolean {
-  const vModel = vendorModel.replace(/[\s-]/g, '').toLowerCase();
-  const aModel = amazonModel.replace(/[\s-]/g, '').toLowerCase();
-  return Boolean(vModel) && Boolean(aModel) && (vModel.includes(aModel) || aModel.includes(vModel));
-}
+export { modelsMatch };
 
 function compareIdentity(vendor: VendorListingJson, amazon: AmazonListingJson): IdentityComparison {
   return {
@@ -43,10 +38,9 @@ export function buildRowComparisonPayload(
       ),
       packaging: comparePackaging(vendor.normalized.packaging, amazon.normalized.packaging),
       identity: compareIdentity(vendor, amazon),
-      specifications: compareSpecifications(vendor, amazon),
-      content: {
-        descriptionMatchPct: compareDescriptions(vendor, amazon),
-      },
+      // Specs / description scoring disabled — stubs kept for payload shape compatibility.
+      specifications: { overlappingKeys: [], mismatches: [], matchPct: 0 },
+      content: { descriptionMatchPct: 0 },
     },
   };
 }

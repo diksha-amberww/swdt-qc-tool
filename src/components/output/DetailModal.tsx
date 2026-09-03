@@ -133,8 +133,15 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
                 Confidence Score: {(result.confidenceScore * 100).toFixed(0)}%
               </span>
             </div>
-            <p className="text-xs text-slate-700 leading-relaxed font-medium">
-              {result.verdictSentence || result.aiVerdictReason}
+            <p className="text-xs text-slate-700 leading-relaxed font-medium font-mono">
+              {result.failReason
+                ? `Fail reason: ${result.failReason}`
+                : result.status === 'PASSED'
+                  ? 'PASSED'
+                  : result.verdictSentence || result.aiVerdictReason || '—'}
+              {result.variantConflict && result.variantConflict !== 'NONE'
+                ? ` · Variant: ${result.variantConflict}`
+                : ''}
             </p>
           </div>
 
@@ -144,10 +151,10 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
               <span className="text-[11px] font-bold text-slate-500 block mb-1">Title (AI)</span>
               <div className="flex items-end justify-between">
                 <span className="text-lg font-black text-slate-900">
-                  {result.titleSameProduct == null ? '—' : result.titleSameProduct ? 'Same' : 'No'}
+                  {result.titleResult ?? (result.titleSameProduct == null ? '—' : result.titleSameProduct ? 'YES' : 'NO')}
                 </span>
-                <span className={`text-[11px] font-bold ${result.titleSameProduct ? 'text-emerald-600' : 'text-amber-600'}`}>
-                  {result.titleMatchPct}% tokens
+                <span className={`text-[11px] font-bold ${result.titleResult === 'YES' || result.titleSameProduct ? 'text-emerald-600' : result.titleResult === 'NO' || result.titleSameProduct === false ? 'text-red-600' : 'text-amber-600'}`}>
+                  {result.titleResult === 'YES' || result.titleSameProduct ? 'SAME PRODUCT' : result.titleResult === 'NO' || result.titleSameProduct === false ? 'DIFFERENT' : 'NOT CHECKED'}
                 </span>
               </div>
             </div>
@@ -155,15 +162,21 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
               <span className="text-[11px] font-bold text-slate-500 block mb-1">Image Similarity</span>
               <div className="flex items-end justify-between">
-                <span className="text-lg font-black text-slate-900">{result.imageSimilarityPct}%</span>
-                <span className={`text-[11px] font-bold ${result.imageSimilarityPct >= imageThreshold ? 'text-emerald-600' : 'text-red-600'}`}>
-                  {result.imageSimilarityPct >= imageThreshold ? `PASS (≥${imageThreshold}%)` : `BELOW ${imageThreshold}%`}
+                <span className="text-lg font-black text-slate-900">
+                  {result.imageSimilarityPct == null ? '—' : `${result.imageSimilarityPct}%`}
+                </span>
+                <span className={`text-[11px] font-bold ${result.imageSimilarityPct != null && result.imageSimilarityPct >= imageThreshold ? 'text-emerald-600' : result.imageSimilarityPct != null ? 'text-red-600' : 'text-amber-600'}`}>
+                  {result.imageSimilarityPct == null
+                    ? 'NOT CHECKED'
+                    : result.imageSimilarityPct >= imageThreshold
+                      ? `PASS (≥${imageThreshold}%)`
+                      : `BELOW ${imageThreshold}%`}
                 </span>
               </div>
               <div className="w-full bg-slate-200 h-1.5 rounded-full mt-2 overflow-hidden">
                 <div
-                  className={`h-full ${result.imageSimilarityPct >= imageThreshold ? 'bg-emerald-500' : 'bg-red-500'}`}
-                  style={{ width: `${Math.min(100, result.imageSimilarityPct)}%` }}
+                  className={`h-full ${result.imageSimilarityPct != null && result.imageSimilarityPct >= imageThreshold ? 'bg-emerald-500' : 'bg-red-500'}`}
+                  style={{ width: `${Math.min(100, result.imageSimilarityPct ?? 0)}%` }}
                 />
               </div>
             </div>
@@ -373,10 +386,10 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
                   Model: <strong className={result.modelMatch ? 'text-emerald-700' : 'text-red-600'}>{result.modelMatch ? 'PARTIAL MATCH' : 'MISMATCH'}</strong>
                 </div>
                 <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
-                  Specs: <strong>{result.specMatchPct}%</strong>
+                  Variant: <strong>{result.variantConflict || '—'}</strong>
                 </div>
                 <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
-                  Description: <strong>{result.descriptionMatchPct}%</strong>
+                  Fail: <strong className="font-mono">{result.failReason || '—'}</strong>
                 </div>
               </div>
             </div>
@@ -421,13 +434,26 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
           {tab === 'specs' && (
             <div className="space-y-2 text-xs">
               <p>
-                Specs match <strong>{result.specMatchPct}%</strong>
-                {' · '}
-                Description match <strong>{result.descriptionMatchPct}%</strong>
+                Specs and description % scoring are disabled. Core checks: brand, model, pack, UPC, image, variant, title.
               </p>
-              <pre className="bg-slate-50 border border-slate-200 rounded-lg p-3 overflow-auto max-h-72 text-[11px]">
-                {JSON.stringify(result.comparisonPayload?.comparison.specifications || {}, null, 2)}
-              </pre>
+              <p>
+                Fail reason: <strong className="font-mono">{result.failReason || '—'}</strong>
+                {' · '}
+                Variant: <strong>{result.variantConflict || '—'}</strong>
+                {' · '}
+                Pack confidence: <strong>{result.packConfidence || '—'}</strong>
+              </p>
+              <ul className="space-y-1 bg-slate-50 border border-slate-200 rounded-lg p-3">
+                {(result.checks || []).map((c) => (
+                  <li key={c.name}>
+                    <strong className="uppercase">{c.name}</strong>:{' '}
+                    <span className={c.result === 'yes' ? 'text-emerald-700' : c.result === 'no' ? 'text-red-700' : 'text-amber-700'}>
+                      {c.result}
+                    </span>{' '}
+                    — {c.detail}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 

@@ -54,6 +54,8 @@ const electronAPI = {
       titleSimilarityThreshold: number;
       imageSimilarityThreshold: number;
       strictPackQuantity: boolean;
+      specMatchThreshold?: number;
+      descriptionMatchThreshold?: number;
     };
   }) => ipcRenderer.invoke('qc:evaluateRow', payload),
   onVendorLoginProgress: (callback: (progress: SeawideLoginProgress) => void) => {

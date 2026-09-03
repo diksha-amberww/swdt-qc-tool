@@ -16,5 +16,5 @@ export { buildRowComparisonPayload, titleSimilarityPct, brandsMatch } from './co
 export { brandMatchDetail } from './compare/brandComparator';
 export { upcsMatch, normalizeUpcDigits } from './compare/upcComparator';
 export { comparePackaging } from './compare/packagingComparator';
-export { compareTitlesWithAi } from './compare/titleAiComparator';
+export { compareListingsWithClaude } from './ai/claudeQcComparator';
 export { resolveClaudeCredentials } from './ai/claudeCredentials';

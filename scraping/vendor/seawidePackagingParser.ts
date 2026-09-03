@@ -17,8 +17,10 @@ const CASE_QTY_KEYS = ['mfg case qty', 'mfg case', 'case qty', 'case quantity', 
 const UNIT_SIZE_KEYS = ['unit size', 'size', 'volume', 'net contents'];
 const UNIT_TYPE_KEYS = ['unit type', 'package type', 'container type'];
 
-const PACK_TOKEN_RE = /\b(single|pack of \d+|\d+\s*[- ]?pack)\b/i;
+const PACK_TOKEN_RE = /\b(single|pack of \d+|\d+\s*[- ]?pack|\d+\s*[- ]?(count|ct|pcs|pieces))\b/i;
 const PACK_SEGMENT_RE = /^(single|each|ea\.?|one)$/i;
+// A case/box/carton of N is ONE deliverable container holding N — N is case qty, never pack size.
+const CASE_TOKEN_RE = /\b(?:case|box|carton)\s+of\s+(\d+)\b/i;
 
 function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -43,6 +45,7 @@ function pushSignal(
   source: PackagingSignal['source'],
   field: string,
   rawValue: string,
+  parsedOverride?: number | null,
 ): void {
   const value = cleanText(rawValue);
   if (!value) return;
@@ -50,7 +53,7 @@ function pushSignal(
     source,
     field,
     rawValue: value,
-    parsedNumber: parseLeadingNumber(value),
+    parsedNumber: parsedOverride !== undefined ? parsedOverride : parseLeadingNumber(value),
   });
 }
 
@@ -106,11 +109,20 @@ export function buildVendorPackagingProfile(raw: VendorRawListing): PackagingPro
     : raw.shortDescription.split(';').map((s) => s.trim()).filter(Boolean);
 
   for (const segment of segments) {
+    const caseToken = segment.match(CASE_TOKEN_RE);
+    if (caseToken) {
+      pushSignal(signals, 'description', 'case.token', caseToken[0], Number(caseToken[1]) || null);
+      continue;
+    }
     if (isPackSegment(segment)) {
       pushSignal(signals, 'description', 'shortDescription.segment', segment);
     }
   }
 
+  const titleCase = raw.titleHtml.match(CASE_TOKEN_RE);
+  if (titleCase) {
+    pushSignal(signals, 'title_token', 'case.token', titleCase[0], Number(titleCase[1]) || null);
+  }
   const titlePack = raw.titleHtml.match(PACK_TOKEN_RE);
   if (titlePack) {
     pushSignal(signals, 'title_token', 'title', titlePack[0]);
@@ -141,7 +153,9 @@ export function buildVendorPackagingProfile(raw: VendorRawListing): PackagingPro
   ]);
   const caseFromCart =
     signals.find((s) => s.field === 'CaseQuantity' && (s.parsedNumber || 0) > 0)?.parsedNumber ?? null;
-  profile.caseQuantity = caseFromAttr ?? caseFromCart;
+  const caseFromToken =
+    signals.find((s) => s.field === 'case.token' && (s.parsedNumber || 0) > 0)?.parsedNumber ?? null;
+  profile.caseQuantity = caseFromAttr ?? caseFromCart ?? caseFromToken;
 
   profile.unitSize = firstText(
     signals.filter((s) => s.source === 'attribute'),

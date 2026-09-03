@@ -22,6 +22,13 @@ export function parseLeadingNumber(value: string | null | undefined): number | n
   if (packOf) return Number(packOf[1]);
   const nPack = lower.match(/(\d+)\s*[- ]?pack/i);
   if (nPack) return Number(nPack[1]);
+  // Volume/dimension strings are not pack counts unless pack wording is present.
+  const looksLikeMeasure =
+    /\b(fl\.?\s*oz|oz|ounce|ounces|ml|\bl\b|liter|liters|litre|litres|gal|gallon|gallons|ft|feet|\bin\b|inch|inches|lb|lbs|pound|pounds|mm|cm)\b/i.test(
+      lower,
+    );
+  const hasPackWording = /\bpack\b|\bcount\b|\bpcs\b|\bpieces\b|\bmultipack\b/i.test(lower);
+  if (looksLikeMeasure && !hasPackWording) return null;
   const leading = lower.match(/^(\d+(?:\.\d+)?)/);
   if (leading) return Number(leading[1]);
   return null;

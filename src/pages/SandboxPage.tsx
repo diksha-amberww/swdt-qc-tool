@@ -115,7 +115,7 @@ export const SandboxPage: React.FC = () => {
       setSandboxTrace((prev) => [
         ...prev,
         `[${new Date().toLocaleTimeString()}] Result calculated: ${result.status} (Confidence: ${(result.confidenceScore * 100).toFixed(0)}%)`,
-        `[${new Date().toLocaleTimeString()}] ${result.verdictSentence}`,
+        `[${new Date().toLocaleTimeString()}] Fail reason: ${result.failReason || '—'} · Variant: ${result.variantConflict || '—'}`,
         ...(result.errors?.length
           ? [`[${new Date().toLocaleTimeString()}] Warnings: ${result.errors.join(' | ')}`]
           : []),
@@ -157,13 +157,9 @@ export const SandboxPage: React.FC = () => {
   const imageChecked = Boolean(
     sandboxResult?.vendorListing.imageUrl && sandboxResult?.amazonListing.imageUrl,
   );
-  const imagePass = sandboxResult && imageChecked
+  const imagePass = sandboxResult && imageChecked && sandboxResult.imageSimilarityPct != null
     ? sandboxResult.imageSimilarityPct >= settings.imageSimilarityThreshold
     : null;
-  const specPass = (sandboxResult?.specMatchPct || 0) >= 70;
-  const specOverlap = sandboxResult?.comparisonPayload?.comparison.specifications.overlappingKeys.length || 0;
-  const specMismatches = sandboxResult?.comparisonPayload?.comparison.specifications.mismatches || [];
-  const descPass = (sandboxResult?.descriptionMatchPct || 0) >= 70;
   const upcHit = sandboxResult?.comparisonPayload?.comparison.identifiers.matchedAmazonIdentifier;
 
   return (
@@ -175,7 +171,7 @@ export const SandboxPage: React.FC = () => {
             <span>Sandbox Single-SKU Debugger</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Same QC engine as batch runs. Compare brand, model, pack size, UPC, image, specs, description, and AI title sameness.
+            Same QC engine as batch runs. One Claude call per SKU for title, image, pack size, and variant conflict.
           </p>
         </div>
 
@@ -355,8 +351,12 @@ export const SandboxPage: React.FC = () => {
                 </div>
 
                 <div className="p-3.5 rounded-lg bg-purple-50/50 border border-purple-100">
-                  <span className="text-xs font-bold text-purple-900 block mb-1">Verdict sentence</span>
-                  <p className="text-xs text-slate-700 leading-relaxed">{sandboxResult.verdictSentence}</p>
+                  <span className="text-xs font-bold text-purple-900 block mb-1">Fail reason</span>
+                  <p className="text-xs text-slate-700 leading-relaxed font-mono font-bold">
+                    {sandboxResult.failReason || (sandboxResult.status === 'PASSED' ? '—' : sandboxResult.aiVerdictReason || '—')}
+                    {sandboxResult.variantConflict ? ` · Variant ${sandboxResult.variantConflict}` : ''}
+                    {sandboxResult.packConfidence ? ` · Pack ${sandboxResult.packConfidence}` : ''}
+                  </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -438,43 +438,54 @@ export const SandboxPage: React.FC = () => {
                   </div>
 
                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">Image (1 vs 1)</span>
+                    <span className="text-slate-500 font-semibold block mb-1">Image (AI, 1 vs 1)</span>
                     <span className="text-base font-black text-slate-900">
-                      {imageChecked ? `${sandboxResult.imageSimilarityPct}%` : '—'}
+                      {sandboxResult.imageSimilarityPct == null ? '—' : `${sandboxResult.imageSimilarityPct}%`}
                     </span>
                     <span className={`block text-[10px] font-bold mt-0.5 ${matchClass(imagePass)}`}>
                       {matchLabel(
                         imagePass,
                         `Pass (≥${settings.imageSimilarityThreshold}%)`,
                         `Below ${settings.imageSimilarityThreshold}%`,
-                        'Image missing on one side',
+                        sandboxResult.imageSimilarityPct == null
+                          ? 'Image AI not completed'
+                          : 'Image missing on one side',
                       )}
                     </span>
                   </div>
 
                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">AI title same product</span>
+                    <span className="text-slate-500 font-semibold block mb-1">Title Result (AI)</span>
                     <span className="text-sm font-bold text-slate-800">
-                      {sandboxResult.titleSameProduct == null ? 'Not checked' : sandboxResult.titleSameProduct ? 'Yes' : 'No'}
+                      {sandboxResult.titleResult ??
+                        (sandboxResult.titleSameProduct == null
+                          ? 'Not checked'
+                          : sandboxResult.titleSameProduct
+                            ? 'YES'
+                            : 'NO')}
                     </span>
                     <span className="block text-[10px] text-slate-500 mt-0.5">
-                      Token overlap {sandboxResult.titleMatchPct}% · Haiku titles only
+                      Unified Claude QC · one call per SKU
                     </span>
                   </div>
 
                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">Specs match</span>
-                    <span className="text-base font-black text-slate-900">{sandboxResult.specMatchPct}%</span>
-                    <span className={`block text-[10px] font-bold mt-0.5 ${specOverlap === 0 ? 'text-amber-600' : specPass ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {specOverlap === 0 ? 'No overlapping attributes' : specPass ? 'Pass (≥70%)' : 'Below 70%'}
+                    <span className="text-slate-500 font-semibold block mb-1">Variant conflict</span>
+                    <span className="text-base font-black text-slate-900">{sandboxResult.variantConflict || '—'}</span>
+                    <span className={`block text-[10px] font-bold mt-0.5 ${sandboxResult.variantConflict && sandboxResult.variantConflict !== 'NONE' ? 'text-red-600' : 'text-emerald-600'}`}>
+                      {sandboxResult.variantConflict == null
+                        ? 'Not checked'
+                        : sandboxResult.variantConflict === 'NONE'
+                          ? 'No conflict'
+                          : sandboxResult.variantConflict}
                     </span>
                   </div>
 
                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">Description match</span>
-                    <span className="text-base font-black text-slate-900">{sandboxResult.descriptionMatchPct}%</span>
-                    <span className={`block text-[10px] font-bold mt-0.5 ${descPass ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {descPass ? 'Pass (≥70%)' : 'Below 70%'}
+                    <span className="text-slate-500 font-semibold block mb-1">Pack confidence</span>
+                    <span className="text-base font-black text-slate-900">{sandboxResult.packConfidence || '—'}</span>
+                    <span className={`block text-[10px] font-bold mt-0.5 ${sandboxResult.packConfidence === 'UNSURE' ? 'text-amber-600' : 'text-slate-500'}`}>
+                      {sandboxResult.packConfidence === 'UNSURE' ? 'Manual review' : 'AI pack certainty'}
                     </span>
                   </div>
 
@@ -486,35 +497,6 @@ export const SandboxPage: React.FC = () => {
                     <span className="block text-[10px] font-bold text-slate-500 mt-0.5">Not used in pass/fail</span>
                   </div>
                 </div>
-
-                {(specOverlap > 0 || (sandboxResult.vendorListingFull?.raw.attributes.length || 0) > 0) && (
-                  <div className="rounded-lg border border-slate-200 overflow-hidden">
-                    <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-600 uppercase tracking-wider">
-                      Attribute mapping
-                    </div>
-                    <div className="max-h-40 overflow-y-auto text-[11px]">
-                      {specMismatches.map((row) => (
-                        <div key={`mm-${row.key}`} className="grid grid-cols-3 gap-2 px-3 py-1.5 border-b border-slate-100">
-                          <span className="font-semibold text-slate-700 truncate">{row.key}</span>
-                          <span className="text-slate-600 truncate" title={row.vendorValue}>{row.vendorValue}</span>
-                          <span className="text-red-700 truncate" title={row.amazonValue}>{row.amazonValue}</span>
-                        </div>
-                      ))}
-                      {specOverlap === 0 && (sandboxResult.vendorListingFull?.raw.attributes || []).slice(0, 8).map((attr) => (
-                        <div key={`va-${attr.key}`} className="grid grid-cols-3 gap-2 px-3 py-1.5 border-b border-slate-100">
-                          <span className="font-semibold text-slate-700 truncate">{attr.key}</span>
-                          <span className="text-slate-600 truncate">{attr.value}</span>
-                          <span className="text-slate-400">no Amazon pair</span>
-                        </div>
-                      ))}
-                      {specOverlap > 0 && specMismatches.length === 0 && (
-                        <div className="px-3 py-2 text-emerald-700 font-semibold">
-                          {specOverlap} overlapping attribute{specOverlap === 1 ? '' : 's'} matched.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
               </div>
 
               <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-4 flex-1 flex flex-col min-h-0">
