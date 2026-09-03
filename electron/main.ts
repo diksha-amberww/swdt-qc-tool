@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { applyElectronStealthSwitches } from './electronStealth';
 import { testSeawideLogin, SEAWIDE_LOGIN_URL } from './seawideLogin';
 import {
   ensureVendorSession,
@@ -9,8 +10,16 @@ import {
   clearVendorSession,
 } from './seawideSession';
 import { readProjectEnv, resolveVendorCredentials, writeProjectEnv } from '../shared/envUtils';
+import { getVendorPartitionFetch } from './vendorFetch';
+import { scrapeVendorListing } from '../scraping/vendor/seawideVendorEngine';
+import { fetchAmazonListing } from '../scraping/amazon/amazonSpApiEngine';
+import { testAmazonTokenRefresh, resolveAmazonCredentials } from '../scraping/amazon/amazonTokenProvider';
+import { evaluateQcRow, type QcEvaluateSettings } from '../scraping/qc/evaluateRow';
+import { resolveClaudeCredentials } from '../scraping/ai/claudeCredentials';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+applyElectronStealthSwitches();
 
 // Keep the QC loop running on low-end machines even when the window is occluded.
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
@@ -218,6 +227,47 @@ app.whenReady().then(() => {
     await clearVendorSession();
     return true;
   });
+
+  ipcMain.handle(
+    'vendor:scrapeListing',
+    async (_event, payload: { upc?: string; vendorModel?: string; asin?: string }) => {
+      return scrapeVendorListing(
+        {
+          asin: payload.asin || '',
+          upc: payload.upc || '',
+          vendorModel: payload.vendorModel || '',
+        },
+        { fetchImpl: getVendorPartitionFetch() },
+      );
+    },
+  );
+
+  ipcMain.handle('amazon:fetchListing', async (_event, payload: { asin: string }) => {
+    return fetchAmazonListing(payload.asin, resolveAmazonCredentials(app.getAppPath()));
+  });
+
+  ipcMain.handle('amazon:testConnection', async () => {
+    return testAmazonTokenRefresh(resolveAmazonCredentials(app.getAppPath()));
+  });
+
+  ipcMain.handle(
+    'qc:evaluateRow',
+    async (
+      _event,
+      payload: {
+        row: { asin: string; upc: string; vendorModel: string };
+        settings: QcEvaluateSettings;
+      },
+    ) => {
+      return evaluateQcRow(payload.row, {
+        fetchImpl: getVendorPartitionFetch(),
+        settings: payload.settings,
+        amazonCreds: resolveAmazonCredentials(app.getAppPath()),
+        claudeCreds: resolveClaudeCredentials(app.getAppPath()),
+        appPath: app.getAppPath(),
+      });
+    },
+  );
 
   createWindow();
 

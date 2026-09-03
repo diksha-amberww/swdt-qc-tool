@@ -1,8 +1,8 @@
-import React, { Suspense, useEffect } from 'react';
-import { Outlet } from 'react-router-dom';
+import React, { useEffect } from 'react';
 import { Header } from './Header';
 import { Navbar } from './Navbar';
 import { StatusBar } from './StatusBar';
+import { PersistentPages } from './PersistentPages';
 import { useCredStore } from '../../store/useCredStore';
 import { bootTheme, readStoredTheme } from '../../store/useThemeStore';
 
@@ -15,20 +15,17 @@ export const AppLayout: React.FC = () => {
     loadCredentialsFromEnv();
   }, [loadCredentialsFromEnv]);
 
+  useEffect(() => {
+    // Never globally lock the shell — pages stay usable while work runs in the background.
+    document.body.classList.remove('analyzing');
+  }, []);
+
   return (
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-app text-fg">
       <Header />
       <Navbar />
       <main className="flex-1 min-h-0 overflow-hidden relative contain-paint">
-        <Suspense
-          fallback={
-            <div className="h-full w-full flex items-center justify-center text-xs text-fg-muted bg-app">
-              Loading section…
-            </div>
-          }
-        >
-          <Outlet />
-        </Suspense>
+        <PersistentPages />
       </main>
       <StatusBar />
     </div>

@@ -1,9 +1,157 @@
 import { RawInputRow, ValidationSummary, ValidationErrorItem } from '../types/qc';
 
+export const INPUT_HEADER_ROW = 'ASIN\tUPC\tVENDOR MODEL';
+
+type FieldKind = 'asin' | 'upc' | 'vendorModel';
+
+function isHeaderToken(token: string): boolean {
+  const t = token.trim().toLowerCase();
+  return (
+    t.includes('asin') ||
+    t.includes('upc') ||
+    t.includes('barcode') ||
+    t.includes('vendor') ||
+    t.includes('model') ||
+    t.includes('sku') ||
+    t === 'pid'
+  );
+}
+
+function looksLikeUpc(token: string): boolean {
+  const digits = token.replace(/\D/g, '');
+  if (!/^\d{8,14}$/.test(digits)) return false;
+  // Prefer mostly-numeric tokens (allow spaces/dashes in pasted barcodes)
+  const alnum = token.replace(/[\s-]/g, '');
+  return /^\d+$/.test(alnum);
+}
+
+function looksLikeAsin(token: string): boolean {
+  const t = token.trim();
+  // Amazon ASINs are 10 alphanumeric; nearly all retail ASINs start with B
+  if (/^B[0-9A-Z]{9}$/i.test(t)) return true;
+  // Fallback: pure 10-char alnum with no separators (less common ASIN shapes)
+  return /^[A-Z0-9]{10}$/i.test(t) && !/[-\/_.]/.test(t) && /[A-Z]/i.test(t) && /\d/.test(t);
+}
+
+function classifyToken(token: string): FieldKind {
+  const t = token.trim();
+  if (looksLikeUpc(t)) return 'upc';
+  if (looksLikeAsin(t)) return 'asin';
+  return 'vendorModel';
+}
+
+/**
+ * Map unordered tokens into asin / upc / vendorModel by value shape.
+ * Works with any column order and without headers.
+ */
+export function identifyRowFields(tokens: string[]): {
+  asin: string;
+  upc: string;
+  vendorModel: string;
+  unused: string[];
+} {
+  const cleaned = tokens.map((t) => t.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+  let asin = '';
+  let upc = '';
+  let vendorModel = '';
+  const unused: string[] = [];
+
+  // First pass: high-confidence UPC + ASIN
+  const remaining: string[] = [];
+  for (const token of cleaned) {
+    if (!upc && looksLikeUpc(token)) {
+      upc = token.replace(/\D/g, '');
+      continue;
+    }
+    if (!asin && looksLikeAsin(token)) {
+      asin = token.toUpperCase();
+      continue;
+    }
+    remaining.push(token);
+  }
+
+  // Second pass: leftover tokens → vendor model (prefer the most "model-like")
+  if (remaining.length === 1) {
+    vendorModel = remaining[0];
+  } else if (remaining.length > 1) {
+    // Prefer token with letters + digits / hyphens (SeaWide pid style)
+    const ranked = [...remaining].sort((a, b) => scoreVendorModel(b) - scoreVendorModel(a));
+    vendorModel = ranked[0];
+    unused.push(...ranked.slice(1));
+  }
+
+  return { asin, upc, vendorModel, unused };
+}
+
+function scoreVendorModel(token: string): number {
+  let score = 0;
+  if (/[A-Za-z]/.test(token)) score += 3;
+  if (/\d/.test(token)) score += 2;
+  if (/[-_/]/.test(token)) score += 2;
+  if (token.length >= 5 && token.length <= 40) score += 1;
+  if (looksLikeUpc(token)) score -= 10;
+  if (looksLikeAsin(token)) score -= 5;
+  return score;
+}
+
 export class ValidatorService {
-  /**
-   * Parses raw copy-pasted text from Excel / TSV / CSV
-   */
+  static INPUT_HEADER = INPUT_HEADER_ROW;
+  static identifyFields = identifyRowFields;
+  static classifyToken = classifyToken;
+
+  /** Values-only area (header is fixed in the UI, not stored here). */
+  static getInputTemplate(): string {
+    return '';
+  }
+
+  /** Remove a pasted header row if the user copied the full sheet from Excel. */
+  static stripHeaderFromPaste(text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed) return '';
+
+    const lines = trimmed.split(/\r?\n/);
+    const firstLine = lines[0] || '';
+    let delimiter = '\t';
+    if (firstLine.includes('\t')) delimiter = '\t';
+    else if (firstLine.includes('|')) delimiter = '|';
+    else if (firstLine.includes(',')) delimiter = ',';
+    else if (firstLine.includes(';')) delimiter = ';';
+
+    const firstTokens = firstLine.split(delimiter).map((t) => t.trim());
+    const hasHeader = firstTokens.length > 0 && firstTokens.every((t) => !t || isHeaderToken(t));
+    const dataLines = hasHeader ? lines.slice(1) : lines;
+    return dataLines.join('\n').replace(/\n+$/, '');
+  }
+
+  static countDataRows(dataOnly: string): number {
+    return dataOnly.trim().split(/\r?\n/).filter((l) => l.trim().length > 0).length;
+  }
+
+  static toFullInput(dataOnly: string): string {
+    const body = dataOnly.trim();
+    if (!body) return INPUT_HEADER_ROW;
+    return `${INPUT_HEADER_ROW}\n${body}`;
+  }
+
+  static parseDataRows(dataOnly: string): ValidationSummary {
+    const trimmed = dataOnly.trim();
+    if (!trimmed) {
+      return {
+        isValid: false,
+        totalRows: 0,
+        validRowsCount: 0,
+        invalidRowsCount: 0,
+        errors: [{ row: 0, field: 'all', message: 'Add at least one row of values below the header.' }],
+        validRows: [],
+      };
+    }
+    return ValidatorService.parseRawText(ValidatorService.toFullInput(trimmed));
+  }
+
+  static withHeaderRow(tsvBody: string): string {
+    return ValidatorService.stripHeaderFromPaste(tsvBody);
+  }
+
   static parseRawText(rawText: string): ValidationSummary {
     const trimmed = rawText.trim();
     if (!trimmed) {
@@ -29,48 +177,19 @@ export class ValidatorService {
       };
     }
 
-    // Determine delimiter (Tab, Comma, Pipe, or Semicolon)
     const firstLine = lines[0];
     let delimiter = '\t';
-    if (firstLine.includes('\t')) {
-      delimiter = '\t';
-    } else if (firstLine.includes('|')) {
-      delimiter = '|';
-    } else if (firstLine.includes(',')) {
-      delimiter = ',';
-    } else if (firstLine.includes(';')) {
-      delimiter = ';';
-    }
+    if (firstLine.includes('\t')) delimiter = '\t';
+    else if (firstLine.includes('|')) delimiter = '|';
+    else if (firstLine.includes(',')) delimiter = ',';
+    else if (firstLine.includes(';')) delimiter = ';';
 
-    // Check if first line is a header
-    const firstTokens = firstLine.split(delimiter).map((t) => t.trim().toLowerCase());
-    const hasHeader = firstTokens.some((t) =>
-      t.includes('sku') || t.includes('asin') || t.includes('brand') || t.includes('line') || t.includes('upc')
-    );
-
-    let colMap = {
-      partSku: 0,
-      asin: 1,
-      brand: 2,
-      line: 3,
-      upc: 4,
-    };
-
-    let dataStartIndex = 0;
-
-    if (hasHeader) {
-      dataStartIndex = 1;
-      firstTokens.forEach((t, idx) => {
-        if (t.includes('sku') || t.includes('part')) colMap.partSku = idx;
-        else if (t.includes('asin')) colMap.asin = idx;
-        else if (t.includes('brand')) colMap.brand = idx;
-        else if (t.includes('line')) colMap.line = idx;
-        else if (t.includes('upc') || t.includes('barcode')) colMap.upc = idx;
-      });
-    }
+    const firstTokens = firstLine.split(delimiter).map((t) => t.trim());
+    const hasHeader = firstTokens.length > 0 && firstTokens.every((t) => !t || isHeaderToken(t));
 
     const validRows: RawInputRow[] = [];
     const errors: ValidationErrorItem[] = [];
+    const dataStartIndex = hasHeader ? 1 : 0;
 
     for (let i = dataStartIndex; i < lines.length; i++) {
       const lineStr = lines[i].trim();
@@ -78,37 +197,43 @@ export class ValidatorService {
 
       const rawRowNumber = i + 1;
       const tokens = lineStr.split(delimiter).map((t) => t.trim().replace(/^["']|["']$/g, ''));
-
-      const partSku = (tokens[colMap.partSku] || '').trim();
-      const asin = (tokens[colMap.asin] || '').trim();
-      const brand = (tokens[colMap.brand] || '').trim();
-      const line = (tokens[colMap.line] || '').trim();
-      const upc = (tokens[colMap.upc] || '').trim();
-
+      const { asin, upc, vendorModel } = identifyRowFields(tokens);
       const rowErrors: ValidationErrorItem[] = [];
 
-      if (!partSku) {
-        rowErrors.push({ row: rawRowNumber, field: 'PART SKU', message: 'Missing required PART SKU', value: partSku });
-      }
-
       if (!asin) {
-        rowErrors.push({ row: rawRowNumber, field: 'ASIN', message: 'Missing required ASIN', value: asin });
+        rowErrors.push({
+          row: rawRowNumber,
+          field: 'ASIN',
+          message: 'Could not detect ASIN (expected 10-char code like B0000AXN5U)',
+          value: tokens.join(' | '),
+        });
       } else if (!/^[A-Z0-9]{10}$/i.test(asin)) {
-        rowErrors.push({ row: rawRowNumber, field: 'ASIN', message: 'Invalid ASIN format (must be 10 alphanumeric characters)', value: asin });
-      }
-
-      if (!brand) {
-        rowErrors.push({ row: rawRowNumber, field: 'Brand', message: 'Missing Brand name', value: brand });
-      }
-
-      if (!line) {
-        rowErrors.push({ row: rawRowNumber, field: 'Line', message: 'Missing Line/Category', value: line });
+        rowErrors.push({
+          row: rawRowNumber,
+          field: 'ASIN',
+          message: 'Invalid ASIN format (must be 10 alphanumeric characters)',
+          value: asin,
+        });
       }
 
       if (!upc) {
-        rowErrors.push({ row: rawRowNumber, field: 'UPC', message: 'Missing required UPC/Barcode', value: upc });
-      } else if (!/^\d{8,14}$/.test(upc.replace(/\D/g, ''))) {
+        rowErrors.push({
+          row: rawRowNumber,
+          field: 'UPC',
+          message: 'Could not detect UPC (expected 8–14 digit barcode)',
+          value: tokens.join(' | '),
+        });
+      } else if (!/^\d{8,14}$/.test(upc)) {
         rowErrors.push({ row: rawRowNumber, field: 'UPC', message: 'UPC must be 8-14 digits', value: upc });
+      }
+
+      if (!vendorModel) {
+        rowErrors.push({
+          row: rawRowNumber,
+          field: 'VENDOR MODEL',
+          message: 'Could not detect vendor model / SeaWide pid',
+          value: tokens.join(' | '),
+        });
       }
 
       if (rowErrors.length > 0) {
@@ -116,18 +241,16 @@ export class ValidatorService {
       } else {
         validRows.push({
           id: `sku-row-${rawRowNumber}-${Math.random().toString(36).substring(2, 7)}`,
-          partSku,
           asin: asin.toUpperCase(),
-          brand,
-          line,
           upc,
+          vendorModel,
+          partSku: vendorModel,
           rawLineNumber: rawRowNumber,
         });
       }
     }
 
     const totalRows = lines.length - (hasHeader ? 1 : 0);
-
     return {
       isValid: errors.length === 0 && validRows.length > 0,
       totalRows,
@@ -138,20 +261,15 @@ export class ValidatorService {
     };
   }
 
-  /**
-   * Sample Preset generator for quick user testing
-   */
-  static getSamplePreset(): string {
+  static getSampleDataRows(): string {
     return [
-      'PART SKU\tASIN\tBrand\tLine\tUPC',
-      'SKU-SWD-10492\tB0000AXN5U\tSierra Marine\tElectrical\t030999014923',
-      'SKU-SWD-20914\tB07KM48P9X\tSeachoice\tHardware & Fasteners\t719249501481',
-      'SKU-SWD-33819\tB01N10VZ28\tTeleflex\tSteering & Control\t731957002819',
-      'SKU-SWD-44910\tB08XYZ1234\tAttwood\tLighting & Electronics\t022697554910',
-      'SKU-SWD-55021\tB001449GTY\tBlue Sea Systems\tCircuit Protection\t632024055021',
-      'SKU-SWD-66190\tB09ABC5678\tJabsco\tPlumbing & Pumps\t671880066190',
-      'SKU-SWD-77821\tB009088MNO\tRule Industries\tBilge Pumps\t042237077821',
-      'SKU-SWD-88934\tB07DFG7890\tAncor Marine\tWire & Cable\t091887088934',
+      'B0000AXN5U\t686226806970\tPRM80697',
+      'B07KM48P9X\t790444031103\tKIT04F-CZ6U51-06',
+      'B01N10VZ28\t000000000000\tMST140D',
     ].join('\n');
+  }
+
+  static getSamplePreset(): string {
+    return ValidatorService.getSampleDataRows();
   }
 }

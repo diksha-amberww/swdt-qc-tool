@@ -5,7 +5,23 @@ import renderer from 'vite-plugin-electron-renderer';
 import path from 'path';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { resolveVendorCredentials, readProjectEnv, writeProjectEnv } from './shared/envUtils';
-import { runElectronLoginTest, runElectronEnsureSession } from './shared/runElectronLogin';
+import {
+  runElectronLoginTest,
+  runElectronEnsureSession,
+  runElectronQcEvaluate,
+} from './shared/runElectronLogin';
+
+/** Keep Node/Electron builtins out of the main-process bundle (undici pulls node:sqlite). */
+function isElectronMainExternal(id: string): boolean {
+  return id === 'electron' || id === 'undici' || id.startsWith('node:');
+}
+
+const electronMainBuild = {
+  outDir: 'dist-electron',
+  rollupOptions: {
+    external: isElectronMainExternal,
+  },
+};
 
 function seawideLoginDevPlugin(): Plugin {
   return {
@@ -79,6 +95,21 @@ function seawideLoginDevPlugin(): Plugin {
         },
       );
 
+      server.middlewares.use('/api/dev/amazon-test', async (_req, res) => {
+        res.setHeader('Content-Type', 'application/json');
+        try {
+          const { testAmazonTokenRefresh, resolveAmazonCredentials } = await import(
+            './scraping/amazon/amazonTokenProvider'
+          );
+          const result = await testAmazonTokenRefresh(resolveAmazonCredentials());
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          res.statusCode = 500;
+          res.end(JSON.stringify({ success: false, message, responseTimeMs: 0, endpoint: '' }));
+        }
+      });
+
       server.middlewares.use('/api/dev/vendor-session-status', (_req, res) => {
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ authenticated: false, reason: 'Use vendor-ensure-session before batch runs in browser dev mode.' }));
@@ -124,6 +155,54 @@ function seawideLoginDevPlugin(): Plugin {
           });
         },
       );
+
+      server.middlewares.use('/api/dev/qc-evaluate', (req: IncomingMessage, res: ServerResponse, next) => {
+        if (req.method !== 'POST') {
+          next();
+          return;
+        }
+
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk;
+        });
+        req.on('end', async () => {
+          res.setHeader('Content-Type', 'application/json');
+          try {
+            const payload = JSON.parse(body) as {
+              row: { asin: string; upc: string; vendorModel: string };
+              settings: {
+                priceVarianceThreshold: number;
+                titleSimilarityThreshold: number;
+                imageSimilarityThreshold: number;
+                strictPackQuantity: boolean;
+              };
+              username?: string;
+              password?: string;
+              loginUrl?: string;
+              reuseSession?: boolean;
+            };
+            const resolved = resolveVendorCredentials(
+              payload.username || '',
+              payload.password || '',
+            );
+            const result = await runElectronQcEvaluate({
+              ...payload,
+              username: resolved.username,
+              password: resolved.password,
+              loginUrl: payload.loginUrl,
+            });
+            if (!result.success) {
+              res.statusCode = 502;
+            }
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            res.statusCode = 500;
+            res.end(JSON.stringify({ success: false, message, error: message }));
+          }
+        });
+      });
     },
   };
 }
@@ -142,34 +221,37 @@ export default defineConfig({
           startup();
         },
         vite: {
-          build: {
-            outDir: 'dist-electron',
-            rollupOptions: {
-              external: ['electron'],
-            },
-          },
+          build: electronMainBuild,
         },
       },
       {
         entry: 'electron/loginTestCli.ts',
         vite: {
-          build: {
-            outDir: 'dist-electron',
-            rollupOptions: {
-              external: ['electron'],
-            },
-          },
+          build: electronMainBuild,
         },
       },
       {
         entry: 'electron/sessionEnsureCli.ts',
         vite: {
-          build: {
-            outDir: 'dist-electron',
-            rollupOptions: {
-              external: ['electron'],
-            },
-          },
+          build: electronMainBuild,
+        },
+      },
+      {
+        entry: 'electron/scrapeVendorCli.ts',
+        vite: {
+          build: electronMainBuild,
+        },
+      },
+      {
+        entry: 'electron/scrapeAmazonCli.ts',
+        vite: {
+          build: electronMainBuild,
+        },
+      },
+      {
+        entry: 'electron/qcEvaluateCli.ts',
+        vite: {
+          build: electronMainBuild,
         },
       },
       {

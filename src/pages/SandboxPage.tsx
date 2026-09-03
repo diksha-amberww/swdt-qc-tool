@@ -5,19 +5,51 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
-  ArrowRight,
   Send,
   Sparkles,
-  Barcode,
-  Layers,
   Code2,
-  FileCode,
 } from 'lucide-react';
 import { useQCStore } from '../store/useQCStore';
 import { useLogStore } from '../store/useLogStore';
+import { useSettingsStore } from '../store/useSettingsStore';
 import { ValidatorService } from '../services/validatorService';
-import { MockQCEngine } from '../services/mockQCEngine';
-import { QCStatus } from '../types/qc';
+import { QcEngine } from '../services/qcEngine';
+import { formatPackQty } from '../types/qc';
+import { ProductValueInput } from '../components/upload/ProductValueInput';
+import { placeholderImage } from '../utils/placeholderImage';
+import { JsonCopyBlock } from '../components/ui/JsonCopyBlock';
+
+function matchClass(ok: boolean | null): string {
+  if (ok == null) return 'text-amber-600';
+  return ok ? 'text-emerald-600' : 'text-red-600';
+}
+
+function matchLabel(ok: boolean | null, yes: string, no: string, unknown = 'Needs review'): string {
+  if (ok == null) return unknown;
+  return ok ? yes : no;
+}
+
+function ListingThumb({ src, alt, label }: { src: string; alt: string; label: string }) {
+  const [failed, setFailed] = useState(false);
+  const shown = src && !failed ? src : placeholderImage(label, label.length * 17);
+  const img = (
+    <img
+      src={shown}
+      alt={alt}
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+      className="w-16 h-16 object-contain rounded-md border border-slate-200 bg-white shrink-0"
+    />
+  );
+  if (src && !failed) {
+    return (
+      <a href={src} target="_blank" rel="noreferrer" title="Open image" className="shrink-0">
+        {img}
+      </a>
+    );
+  }
+  return img;
+}
 
 export const SandboxPage: React.FC = () => {
   const {
@@ -27,13 +59,16 @@ export const SandboxPage: React.FC = () => {
     setSandboxResult,
     isSandboxRunning,
     setIsSandboxRunning,
+    sandboxTrace,
+    setSandboxTrace,
+    sandboxPushMessage,
+    setSandboxPushMessage,
     overrideSandboxStatus,
     pushSandboxToOutput,
   } = useQCStore();
+  const settings = useSettingsStore((state) => state.settings);
 
   const addLog = useLogStore((state) => state.addLog);
-  const [pushedMessage, setPushedMessage] = useState<string | null>(null);
-  const [sandboxTrace, setSandboxTrace] = useState<string[]>([]);
 
   const runSandboxAnalysis = async () => {
     setIsSandboxRunning(true);
@@ -42,7 +77,7 @@ export const SandboxPage: React.FC = () => {
       `[${new Date().toLocaleTimeString()}] Parsing single-row input string...`,
     ]);
 
-    const summary = ValidatorService.parseRawText(sandboxInputText);
+    const summary = ValidatorService.parseDataRows(sandboxInputText);
     if (!summary.isValid || summary.validRows.length === 0) {
       setSandboxTrace((prev) => [
         ...prev,
@@ -55,11 +90,11 @@ export const SandboxPage: React.FC = () => {
     const row = summary.validRows[0];
     setSandboxTrace((prev) => [
       ...prev,
-      `[${new Date().toLocaleTimeString()}] Extracted SKU: ${row.partSku} | ASIN: ${row.asin} | Brand: ${row.brand}`,
+      `[${new Date().toLocaleTimeString()}] Extracted MODEL: ${row.vendorModel} | ASIN: ${row.asin} | UPC: ${row.upc}`,
       `[${new Date().toLocaleTimeString()}] Ensuring Seawide vendor session (reuse existing if available)...`,
     ]);
 
-    const sessionOk = await MockQCEngine.ensureBatchSession();
+    const sessionOk = await QcEngine.ensureBatchSession();
     if (!sessionOk) {
       setSandboxTrace((prev) => [
         ...prev,
@@ -71,23 +106,27 @@ export const SandboxPage: React.FC = () => {
 
     setSandboxTrace((prev) => [
       ...prev,
-      `[${new Date().toLocaleTimeString()}] Seawide session ready — running sandbox QC pipeline...`,
-      `[${new Date().toLocaleTimeString()}] Simulating Amazon SP-API items/listings endpoint...`,
-      `[${new Date().toLocaleTimeString()}] Calling Claude Haiku 4.5 comparison analyzer...`,
+      `[${new Date().toLocaleTimeString()}] Seawide session ready — scraping vendor listing and Amazon catalog...`,
     ]);
 
     try {
-      const result = await MockQCEngine.evaluateSingleSku(row);
+      const result = await QcEngine.evaluateSingleSku(row);
       setSandboxResult(result);
       setSandboxTrace((prev) => [
         ...prev,
         `[${new Date().toLocaleTimeString()}] Result calculated: ${result.status} (Confidence: ${(result.confidenceScore * 100).toFixed(0)}%)`,
+        `[${new Date().toLocaleTimeString()}] ${result.verdictSentence}`,
+        ...(result.errors?.length
+          ? [`[${new Date().toLocaleTimeString()}] Warnings: ${result.errors.join(' | ')}`]
+          : []),
         `[${new Date().toLocaleTimeString()}] Sandbox evaluation complete!`,
       ]);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Execution error';
+      setSandboxResult(null);
       setSandboxTrace((prev) => [
         ...prev,
-        `[${new Date().toLocaleTimeString()}] FATAL: ${err?.message || 'Execution error'}`,
+        `[${new Date().toLocaleTimeString()}] FATAL: ${message}`,
       ]);
     } finally {
       setIsSandboxRunning(false);
@@ -97,28 +136,38 @@ export const SandboxPage: React.FC = () => {
   const handlePushToOutput = () => {
     if (!sandboxResult) return;
     pushSandboxToOutput();
-    setPushedMessage(`Pushed SKU ${sandboxResult.partSku} to Live Output Stream!`);
-    addLog('INFO', 'SYSTEM', `Pushed sandbox result for SKU ${sandboxResult.partSku} to live output stream.`);
-    setTimeout(() => setPushedMessage(null), 3000);
+    setSandboxPushMessage(`Pushed ${sandboxResult.vendorModel || sandboxResult.partSku} to Live Output Stream!`);
+    addLog('INFO', 'SYSTEM', `Pushed sandbox result for ${sandboxResult.vendorModel || sandboxResult.partSku} to live output stream.`);
+    window.setTimeout(() => setSandboxPushMessage(null), 3000);
   };
 
   const handleLoadPreset = (type: 'PASS' | 'FAIL' | 'REVIEW') => {
     let preset = '';
     if (type === 'PASS') {
-      preset = 'SKU-SWD-10492\tB0000AXN5U\tSierra Marine\tElectrical\t030999014923';
+      preset = 'B0000AXN5U\t686226806970\tPRM80697';
     } else if (type === 'FAIL') {
-      preset = 'SKU-SWD-20914\tB07KM48P9X\tSeachoice\tHardware & Fasteners\t719249501481';
+      preset = 'B07KM48P9X\t790444031103\tKIT04F-CZ6U51-06';
     } else {
-      preset = 'SKU-SWD-33819\tB01N10VZ28\tTeleflex\tSteering & Control\t731957002819';
+      preset = 'B01N10VZ28\t000000000000\tMST140D';
     }
     setSandboxInputText(preset);
   };
 
   const activeStatus = sandboxResult?.status;
+  const imageChecked = Boolean(
+    sandboxResult?.vendorListing.imageUrl && sandboxResult?.amazonListing.imageUrl,
+  );
+  const imagePass = sandboxResult && imageChecked
+    ? sandboxResult.imageSimilarityPct >= settings.imageSimilarityThreshold
+    : null;
+  const specPass = (sandboxResult?.specMatchPct || 0) >= 70;
+  const specOverlap = sandboxResult?.comparisonPayload?.comparison.specifications.overlappingKeys.length || 0;
+  const specMismatches = sandboxResult?.comparisonPayload?.comparison.specifications.mismatches || [];
+  const descPass = (sandboxResult?.descriptionMatchPct || 0) >= 70;
+  const upcHit = sandboxResult?.comparisonPayload?.comparison.identifiers.matchedAmazonIdentifier;
 
   return (
     <div className="h-full flex flex-col p-6 overflow-hidden">
-      {/* Top Banner */}
       <div className="flex items-center justify-between pb-4 border-b border-slate-200 shrink-0">
         <div>
           <h2 className="text-xl font-extrabold text-slate-900 tracking-tight flex items-center space-x-2">
@@ -126,7 +175,7 @@ export const SandboxPage: React.FC = () => {
             <span>Sandbox Single-SKU Debugger</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Test and inspect individual product listings with live AI verification, pulsating status cards, and manual override controls.
+            Same QC engine as batch runs. Compare brand, model, pack size, UPC, image, specs, description, and AI title sameness.
           </p>
         </div>
 
@@ -153,25 +202,21 @@ export const SandboxPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Sandbox Grid */}
       <div className="flex-1 min-h-0 grid grid-cols-12 gap-6 pt-4 overflow-y-auto">
-        {/* Left Column: Input Box & Big Pulsating Status Cards (5 cols) */}
         <div className="col-span-5 flex flex-col space-y-4">
-          {/* Input Box Card */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-4 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                Single-Row Input (TSV / Excel format)
+                Single-Row Input
               </span>
-              <span className="text-[11px] text-slate-400 font-mono">PART SKU | ASIN | Brand | Line | UPC</span>
+              <span className="text-[11px] text-slate-400">header fixed · one row of values</span>
             </div>
 
-            <textarea
+            <ProductValueInput
               value={sandboxInputText}
-              onChange={(e) => setSandboxInputText(e.target.value)}
-              placeholder="SKU-SWD-8849	B07XQ94ABC	Sierra Marine	Electrical	030999884901"
+              onChange={setSandboxInputText}
+              placeholder="B0000AXN5U	686226806970	PRM80697"
               rows={3}
-              className="w-full p-2.5 font-mono text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 resize-none"
             />
 
             <div className="flex items-center justify-between pt-1">
@@ -199,14 +244,13 @@ export const SandboxPage: React.FC = () => {
               )}
             </div>
 
-            {pushedMessage && (
+            {sandboxPushMessage && (
               <span className="block text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 p-2 rounded-lg text-center animate-in fade-in">
-                {pushedMessage}
+                {sandboxPushMessage}
               </span>
             )}
           </div>
 
-          {/* Big Visual Cards with Pulsating Glow Effect & Manual Override Click */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-4 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
@@ -216,9 +260,8 @@ export const SandboxPage: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-3 gap-3">
-              {/* PASSED CARD */}
               <button
-                onClick={() => overrideSandboxStatus('PASSED')}
+                onClick={() => sandboxResult && overrideSandboxStatus('PASSED')}
                 className={`flex flex-col items-center justify-center p-4 rounded-xl border-2 transition-all cursor-pointer text-center ${
                   activeStatus === 'PASSED'
                     ? 'bg-emerald-50 border-emerald-500 text-emerald-900 verdict-pulse-pass shadow-lg'
@@ -234,9 +277,8 @@ export const SandboxPage: React.FC = () => {
                 <span className="text-[10px] font-semibold mt-0.5 opacity-80">Catalog Match</span>
               </button>
 
-              {/* FAILED CARD */}
               <button
-                onClick={() => overrideSandboxStatus('FAILED')}
+                onClick={() => sandboxResult && overrideSandboxStatus('FAILED')}
                 className={`flex flex-col items-center justify-center p-4 rounded-xl border-2 transition-all cursor-pointer text-center ${
                   activeStatus === 'FAILED'
                     ? 'bg-red-50 border-red-500 text-red-900 verdict-pulse-fail shadow-lg'
@@ -252,9 +294,8 @@ export const SandboxPage: React.FC = () => {
                 <span className="text-[10px] font-semibold mt-0.5 opacity-80">Discrepancy</span>
               </button>
 
-              {/* MANUAL REVIEW CARD */}
               <button
-                onClick={() => overrideSandboxStatus('MANUAL REVIEW')}
+                onClick={() => sandboxResult && overrideSandboxStatus('MANUAL REVIEW')}
                 className={`flex flex-col items-center justify-center p-4 rounded-xl border-2 transition-all cursor-pointer text-center ${
                   activeStatus === 'MANUAL REVIEW'
                     ? 'bg-amber-50 border-amber-500 text-amber-900 verdict-pulse-review shadow-lg'
@@ -278,7 +319,6 @@ export const SandboxPage: React.FC = () => {
             )}
           </div>
 
-          {/* Execution Trace Container */}
           <div className="bg-slate-900 text-slate-200 rounded-xl border border-slate-800 p-3 shadow-inner flex flex-col font-mono text-[11px] h-48 overflow-hidden">
             <span className="text-[10px] font-bold text-slate-400 uppercase mb-1.5 pb-1 border-b border-slate-800 flex items-center justify-between">
               <span>Sandbox Execution Trace</span>
@@ -298,85 +338,185 @@ export const SandboxPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Column: Comparison Matrix & Raw Data (7 cols) */}
         <div className="col-span-7 flex flex-col space-y-4">
           {sandboxResult ? (
             <>
-              {/* Granular Comparison Matrix */}
               <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 space-y-4">
                 <div className="flex items-center justify-between pb-3 border-b border-slate-200">
                   <div className="flex items-center space-x-2">
                     <Sparkles className="w-4 h-4 text-purple-600" />
                     <h3 className="text-xs font-black text-slate-900 uppercase tracking-wider">
-                      Granular Comparison Matrix
+                      Comparison Matrix
                     </h3>
                   </div>
                   <span className="text-xs font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                    {sandboxResult.partSku} • ASIN: {sandboxResult.asin}
+                    {sandboxResult.vendorModel || sandboxResult.partSku} • ASIN: {sandboxResult.asin}
                   </span>
                 </div>
 
-                {/* Matrix Items */}
+                <div className="p-3.5 rounded-lg bg-purple-50/50 border border-purple-100">
+                  <span className="text-xs font-bold text-purple-900 block mb-1">Verdict sentence</span>
+                  <p className="text-xs text-slate-700 leading-relaxed">{sandboxResult.verdictSentence}</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="flex items-start space-x-3 p-3 bg-blue-50/40 rounded-lg border border-blue-100">
+                    <ListingThumb src={sandboxResult.vendorListing.imageUrl} alt="Vendor" label="Vendor" />
+                    <div className="min-w-0">
+                      <span className="text-[10px] font-bold text-blue-700 uppercase">Vendor</span>
+                      <p className="text-[11px] text-slate-800 font-semibold leading-snug line-clamp-3">
+                        {sandboxResult.vendorListing.title || '—'}
+                      </p>
+                      {!sandboxResult.vendorListing.imageUrl && (
+                        <span className="block text-[10px] font-bold text-amber-700 mt-1">Vendor image not scraped</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-start space-x-3 p-3 bg-amber-50/40 rounded-lg border border-amber-100">
+                    <ListingThumb src={sandboxResult.amazonListing.imageUrl} alt="Amazon" label="Amazon" />
+                    <div className="min-w-0">
+                      <span className="text-[10px] font-bold text-amber-700 uppercase">Amazon</span>
+                      <p className="text-[11px] text-slate-800 font-semibold leading-snug line-clamp-3">
+                        {sandboxResult.amazonListing.title || '—'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-3 gap-3 text-xs">
                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">Title Match Score</span>
-                    <span className="text-base font-black text-slate-900">{sandboxResult.titleMatchPct}%</span>
-                    <span className={`block text-[10px] font-bold mt-0.5 ${sandboxResult.titleMatchPct >= 70 ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {sandboxResult.titleMatchPct >= 70 ? 'Threshold Met (≥70%)' : 'Below Threshold (<70%)'}
+                    <span className="text-slate-500 font-semibold block mb-1">Brand</span>
+                    <span className="text-sm font-bold text-slate-800 block truncate">
+                      {sandboxResult.vendorListing.brand || '—'} vs {sandboxResult.amazonListing.brand || '—'}
+                    </span>
+                    <span className={`block text-[10px] font-bold mt-0.5 ${matchClass(sandboxResult.vendorListing.brand && sandboxResult.amazonListing.brand ? sandboxResult.brandMatch : null)}`}>
+                      {matchLabel(
+                        sandboxResult.vendorListing.brand && sandboxResult.amazonListing.brand ? sandboxResult.brandMatch : null,
+                        'Brand match',
+                        'Brand mismatch',
+                        'Brand unpublished',
+                      )}
                     </span>
                   </div>
 
                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">Price Variance</span>
+                    <span className="text-slate-500 font-semibold block mb-1">Model / MPN</span>
+                    <span className="text-xs font-mono font-bold text-slate-800 block truncate">
+                      {sandboxResult.vendorListing.modelNumber || sandboxResult.vendorModel}
+                    </span>
+                    <span className={`block text-[10px] font-bold mt-0.5 ${matchClass(sandboxResult.vendorListing.modelNumber && sandboxResult.amazonListing.modelNumber ? sandboxResult.modelMatch : null)}`}>
+                      {matchLabel(
+                        sandboxResult.vendorListing.modelNumber && sandboxResult.amazonListing.modelNumber ? sandboxResult.modelMatch : null,
+                        'Partial match',
+                        'Model mismatch',
+                        'Model unpublished',
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <span className="text-slate-500 font-semibold block mb-1">Pack size (not case qty)</span>
+                    <span className="text-sm font-bold text-slate-800">
+                      {formatPackQty(sandboxResult.vendorListing.packQuantity)} vs {formatPackQty(sandboxResult.amazonListing.packQuantity)}
+                    </span>
+                    <span className="block text-[10px] text-slate-500 mt-0.5">
+                      Case: {formatPackQty(sandboxResult.vendorListing.caseQuantity)} vs {formatPackQty(sandboxResult.amazonListing.caseQuantity)}
+                    </span>
+                    <span className={`block text-[10px] font-bold mt-0.5 ${matchClass(sandboxResult.packQtyMatch)}`}>
+                      {matchLabel(sandboxResult.packQtyMatch, 'Pack match', 'Pack discrepancy', 'Pack unpublished')}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <span className="text-slate-500 font-semibold block mb-1">UPC (any Amazon barcode)</span>
+                    <span className="text-xs font-mono font-bold text-slate-800">{sandboxResult.upc}</span>
+                    <span className={`block text-[10px] font-bold mt-0.5 ${matchClass(sandboxResult.upcMatch)}`}>
+                      {sandboxResult.upcMatch
+                        ? `Matched ${upcHit?.type || 'UPC'} ${upcHit?.value || sandboxResult.amazonListing.upc}`
+                        : matchLabel(sandboxResult.upcMatch, 'Verified', 'Barcode mismatch', 'No Amazon UPC')}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <span className="text-slate-500 font-semibold block mb-1">Image (1 vs 1)</span>
+                    <span className="text-base font-black text-slate-900">
+                      {imageChecked ? `${sandboxResult.imageSimilarityPct}%` : '—'}
+                    </span>
+                    <span className={`block text-[10px] font-bold mt-0.5 ${matchClass(imagePass)}`}>
+                      {matchLabel(
+                        imagePass,
+                        `Pass (≥${settings.imageSimilarityThreshold}%)`,
+                        `Below ${settings.imageSimilarityThreshold}%`,
+                        'Image missing on one side',
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <span className="text-slate-500 font-semibold block mb-1">AI title same product</span>
+                    <span className="text-sm font-bold text-slate-800">
+                      {sandboxResult.titleSameProduct == null ? 'Not checked' : sandboxResult.titleSameProduct ? 'Yes' : 'No'}
+                    </span>
+                    <span className="block text-[10px] text-slate-500 mt-0.5">
+                      Token overlap {sandboxResult.titleMatchPct}% · Haiku titles only
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <span className="text-slate-500 font-semibold block mb-1">Specs match</span>
+                    <span className="text-base font-black text-slate-900">{sandboxResult.specMatchPct}%</span>
+                    <span className={`block text-[10px] font-bold mt-0.5 ${specOverlap === 0 ? 'text-amber-600' : specPass ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {specOverlap === 0 ? 'No overlapping attributes' : specPass ? 'Pass (≥70%)' : 'Below 70%'}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <span className="text-slate-500 font-semibold block mb-1">Description match</span>
+                    <span className="text-base font-black text-slate-900">{sandboxResult.descriptionMatchPct}%</span>
+                    <span className={`block text-[10px] font-bold mt-0.5 ${descPass ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {descPass ? 'Pass (≥70%)' : 'Below 70%'}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <span className="text-slate-500 font-semibold block mb-1">Price (display only)</span>
                     <span className="text-base font-black text-slate-900">
                       {sandboxResult.priceVariancePct > 0 ? `+${sandboxResult.priceVariancePct}%` : `${sandboxResult.priceVariancePct}%`}
                     </span>
-                    <span className={`block text-[10px] font-bold mt-0.5 ${Math.abs(sandboxResult.priceVariancePct) <= 15 ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {Math.abs(sandboxResult.priceVariancePct) <= 15 ? 'Within Limit (±15%)' : 'Variance Exceeded'}
-                    </span>
-                  </div>
-
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">Image Similarity</span>
-                    <span className="text-base font-black text-slate-900">{sandboxResult.imageSimilarityPct}%</span>
-                    <span className="block text-[10px] font-bold text-emerald-600 mt-0.5">High Visual Match</span>
-                  </div>
-
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">Pack Quantity</span>
-                    <span className="text-sm font-bold text-slate-800">
-                      {sandboxResult.vendorListing.packQuantity} vs {sandboxResult.amazonListing.packQuantity}
-                    </span>
-                    <span className={`block text-[10px] font-bold mt-0.5 ${sandboxResult.packQtyMatch ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {sandboxResult.packQtyMatch ? 'Exact Match' : 'Pack Discrepancy'}
-                    </span>
-                  </div>
-
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">UPC Match</span>
-                    <span className="text-xs font-mono font-bold text-slate-800">{sandboxResult.upc}</span>
-                    <span className={`block text-[10px] font-bold mt-0.5 ${sandboxResult.upcMatch ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {sandboxResult.upcMatch ? 'Verified 1:1' : 'Barcode Mismatch'}
-                    </span>
-                  </div>
-
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                    <span className="text-slate-500 font-semibold block mb-1">Model / MPN Match</span>
-                    <span className="text-xs font-mono font-bold text-slate-800">{sandboxResult.partSku}</span>
-                    <span className={`block text-[10px] font-bold mt-0.5 ${sandboxResult.modelMatch ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {sandboxResult.modelMatch ? 'Verified MPN' : 'Model Mismatch'}
-                    </span>
+                    <span className="block text-[10px] font-bold text-slate-500 mt-0.5">Not used in pass/fail</span>
                   </div>
                 </div>
 
-                {/* AI Reasoning Text */}
-                <div className="p-3.5 rounded-lg bg-purple-50/50 border border-purple-100">
-                  <span className="text-xs font-bold text-purple-900 block mb-1">Claude Haiku 4.5 AI Synthesis:</span>
-                  <p className="text-xs text-slate-700 leading-relaxed">{sandboxResult.aiVerdictReason}</p>
-                </div>
+                {(specOverlap > 0 || (sandboxResult.vendorListingFull?.raw.attributes.length || 0) > 0) && (
+                  <div className="rounded-lg border border-slate-200 overflow-hidden">
+                    <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-600 uppercase tracking-wider">
+                      Attribute mapping
+                    </div>
+                    <div className="max-h-40 overflow-y-auto text-[11px]">
+                      {specMismatches.map((row) => (
+                        <div key={`mm-${row.key}`} className="grid grid-cols-3 gap-2 px-3 py-1.5 border-b border-slate-100">
+                          <span className="font-semibold text-slate-700 truncate">{row.key}</span>
+                          <span className="text-slate-600 truncate" title={row.vendorValue}>{row.vendorValue}</span>
+                          <span className="text-red-700 truncate" title={row.amazonValue}>{row.amazonValue}</span>
+                        </div>
+                      ))}
+                      {specOverlap === 0 && (sandboxResult.vendorListingFull?.raw.attributes || []).slice(0, 8).map((attr) => (
+                        <div key={`va-${attr.key}`} className="grid grid-cols-3 gap-2 px-3 py-1.5 border-b border-slate-100">
+                          <span className="font-semibold text-slate-700 truncate">{attr.key}</span>
+                          <span className="text-slate-600 truncate">{attr.value}</span>
+                          <span className="text-slate-400">no Amazon pair</span>
+                        </div>
+                      ))}
+                      {specOverlap > 0 && specMismatches.length === 0 && (
+                        <div className="px-3 py-2 text-emerald-700 font-semibold">
+                          {specOverlap} overlapping attribute{specOverlap === 1 ? '' : 's'} matched.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {/* Side-by-side Raw JSON Payload Viewer */}
               <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-4 flex-1 flex flex-col min-h-0">
                 <span className="text-xs font-bold text-slate-800 uppercase tracking-wider mb-2 flex items-center space-x-1.5">
                   <Code2 className="w-4 h-4 text-slate-500" />
@@ -384,14 +524,16 @@ export const SandboxPage: React.FC = () => {
                 </span>
 
                 <div className="grid grid-cols-2 gap-3 flex-1 min-h-[140px]">
-                  <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200 overflow-auto font-mono text-[10px]">
-                    <span className="font-bold text-blue-700 block mb-1">Seawide Vendor Object:</span>
-                    <pre className="text-slate-700">{JSON.stringify(sandboxResult.vendorListing, null, 2)}</pre>
-                  </div>
-                  <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200 overflow-auto font-mono text-[10px]">
-                    <span className="font-bold text-amber-700 block mb-1">Amazon SP-API Object:</span>
-                    <pre className="text-slate-700">{JSON.stringify(sandboxResult.amazonListing, null, 2)}</pre>
-                  </div>
+                  <JsonCopyBlock
+                    label="Seawide Vendor Object:"
+                    labelClassName="text-blue-700"
+                    data={sandboxResult.vendorListingFull || sandboxResult.vendorListing}
+                  />
+                  <JsonCopyBlock
+                    label="Amazon SP-API Object:"
+                    labelClassName="text-amber-700"
+                    data={sandboxResult.amazonListingFull || sandboxResult.amazonListing}
+                  />
                 </div>
               </div>
             </>

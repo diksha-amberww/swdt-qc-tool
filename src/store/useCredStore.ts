@@ -572,26 +572,69 @@ export const useCredStore = create<CredStoreState>((set, get) => ({
     }
 
     const startTime = Date.now();
-    await new Promise((resolve) => setTimeout(resolve, 950));
-    const elapsed = Date.now() - startTime;
     const now = new Date().toLocaleTimeString();
 
-    let testResult: TestResultDetails;
-
     if (section === 'AMAZON') {
-      testResult = {
-        status: 'SUCCESS',
-        testedAt: now,
-        message: 'Amazon SP-API OAuth Token Validated. Catalog & Listings Item scopes active.',
-        details: {
-          endpoint: 'https://sellingpartnerapi-na.amazon.com',
-          responseTimeMs: elapsed,
-          authScope: 'sellingpartnerapi::listings:items sellingpartnerapi::pricing',
-          rateLimitRemaining: '40 req/sec bucket (Token Bucket Burst: 100)',
-          accountStatus: 'North America (US/CA/MX) Seller Enrolled',
-        },
-      };
-    } else if (section === 'CLAUDE') {
+      let testResult: TestResultDetails;
+      try {
+        let ping: { success: boolean; message: string; responseTimeMs: number; endpoint: string };
+        if (window.electronAPI?.testAmazonConnection) {
+          ping = await window.electronAPI.testAmazonConnection();
+        } else {
+          const response = await fetch('/api/dev/amazon-test', { method: 'POST' });
+          ping = (await response.json()) as typeof ping;
+        }
+        testResult = {
+          status: ping.success ? 'SUCCESS' : 'ERROR',
+          testedAt: now,
+          message: ping.message,
+          details: {
+            endpoint: ping.endpoint,
+            responseTimeMs: ping.responseTimeMs,
+            authScope: 'catalog items 2022-04-01',
+            accountStatus: ping.success ? 'LWA token issued' : 'Auth failed',
+          },
+        };
+        set((state) => ({
+          credentials: {
+            ...state.credentials,
+            amazon: {
+              ...state.credentials.amazon,
+              isConnected: ping.success,
+              lastTestedAt: now,
+            },
+          },
+          isTesting: { ...state.isTesting, AMAZON: false },
+          testResults: { ...state.testResults, AMAZON: testResult },
+        }));
+        return ping.success;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        set((state) => ({
+          credentials: {
+            ...state.credentials,
+            amazon: { ...state.credentials.amazon, isConnected: false, lastTestedAt: now },
+          },
+          isTesting: { ...state.isTesting, AMAZON: false },
+          testResults: {
+            ...state.testResults,
+            AMAZON: {
+              status: 'ERROR',
+              testedAt: now,
+              message,
+              details: { endpoint: 'https://api.amazon.com/auth/o2/token', responseTimeMs: Date.now() - startTime },
+            },
+          },
+        }));
+        return false;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 950));
+    const elapsed = Date.now() - startTime;
+
+    let testResult: TestResultDetails;
+    if (section === 'CLAUDE') {
       testResult = {
         status: 'SUCCESS',
         testedAt: now,
@@ -620,10 +663,7 @@ export const useCredStore = create<CredStoreState>((set, get) => ({
 
     set((state) => {
       const creds = { ...state.credentials };
-      if (section === 'AMAZON') {
-        creds.amazon.isConnected = true;
-        creds.amazon.lastTestedAt = now;
-      } else if (section === 'CLAUDE') {
+      if (section === 'CLAUDE') {
         creds.claude.isConnected = true;
         creds.claude.lastTestedAt = now;
       } else if (section === 'EMAIL') {

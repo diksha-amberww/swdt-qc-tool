@@ -1,3 +1,7 @@
+import { applyElectronStealthSwitches } from './electronStealth';
+
+applyElectronStealthSwitches();
+
 import { app } from 'electron';
 import { ensureVendorSession } from './seawideSession';
 import { readProjectEnv, resolveVendorCredentials } from '../shared/envUtils';

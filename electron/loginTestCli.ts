@@ -1,3 +1,7 @@
+import { applyElectronStealthSwitches } from './electronStealth';
+
+applyElectronStealthSwitches();
+
 import { app } from 'electron';
 import { testSeawideLoginBrowser } from './seawideLogin';
 import { resolveVendorCredentials } from '../shared/envUtils';

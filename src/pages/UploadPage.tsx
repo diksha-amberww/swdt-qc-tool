@@ -15,7 +15,8 @@ import { useQCStore } from '../store/useQCStore';
 import { useLogStore } from '../store/useLogStore';
 import { ValidatorService } from '../services/validatorService';
 import { ExcelService } from '../services/excelService';
-import { MockQCEngine } from '../services/mockQCEngine';
+import { QcEngine } from '../services/qcEngine';
+import { ProductValueInput } from '../components/upload/ProductValueInput';
 
 export const UploadPage: React.FC = () => {
   const navigate = useNavigate();
@@ -29,6 +30,8 @@ export const UploadPage: React.FC = () => {
     startQC,
   } = useQCStore();
 
+  const setAnalysisPending = useQCStore((s) => s.setAnalysisPending);
+
   const addLog = useLogStore((state) => state.addLog);
 
   const [activeTab, setActiveTab] = useState<'TEXT' | 'FILE'>('TEXT');
@@ -39,7 +42,7 @@ export const UploadPage: React.FC = () => {
   const handleValidate = () => {
     setIsValidating(true);
     setTimeout(() => {
-      const summary = ValidatorService.parseRawText(rawInputText);
+      const summary = ValidatorService.parseDataRows(rawInputText);
       setValidationSummary(summary);
       setIsValidating(false);
 
@@ -53,10 +56,10 @@ export const UploadPage: React.FC = () => {
 
   // Load Preset
   const handleLoadSample = () => {
-    const sample = ValidatorService.getSamplePreset();
+    const sample = ValidatorService.getSampleDataRows();
     setRawInputText(sample);
     setUploadedFileName('sample_seawide_listings.tsv');
-    const summary = ValidatorService.parseRawText(sample);
+    const summary = ValidatorService.parseDataRows(sample);
     setValidationSummary(summary);
     addLog('INFO', 'SYSTEM', 'Loaded sample Seawide marine listing dataset.');
   };
@@ -70,14 +73,13 @@ export const UploadPage: React.FC = () => {
         try {
           const parsedRows = ExcelService.parseExcelFile(buffer);
           // Convert to TSV text
-          const tsvLines = [
-            'PART SKU\tASIN\tBrand\tLine\tUPC',
-            ...parsedRows.map((r) => `${r.partSku}\t${r.asin}\t${r.brand}\t${r.line}\t${r.upc}`),
-          ].join('\n');
-          
-          setRawInputText(tsvLines);
+          const dataLines = parsedRows
+            .map((r) => `${r.asin}\t${r.upc}\t${r.vendorModel}`)
+            .join('\n');
+
+          setRawInputText(dataLines);
           setUploadedFileName(file.name);
-          const summary = ValidatorService.parseRawText(tsvLines);
+          const summary = ValidatorService.parseDataRows(dataLines);
           setValidationSummary(summary);
           addLog('SUCCESS', 'SYSTEM', `Imported ${parsedRows.length} rows from file: ${file.name}`);
         } catch (err: any) {
@@ -96,13 +98,12 @@ export const UploadPage: React.FC = () => {
       ]);
       if (result && result.buffer) {
         const parsedRows = ExcelService.parseExcelFile(new Uint8Array(result.buffer));
-        const tsvLines = [
-          'PART SKU\tASIN\tBrand\tLine\tUPC',
-          ...parsedRows.map((r) => `${r.partSku}\t${r.asin}\t${r.brand}\t${r.line}\t${r.upc}`),
-        ].join('\n');
-        setRawInputText(tsvLines);
+        const dataLines = parsedRows
+          .map((r) => `${r.asin}\t${r.upc}\t${r.vendorModel}`)
+          .join('\n');
+        setRawInputText(dataLines);
         setUploadedFileName(result.name);
-        const summary = ValidatorService.parseRawText(tsvLines);
+        const summary = ValidatorService.parseDataRows(dataLines);
         setValidationSummary(summary);
         addLog('SUCCESS', 'SYSTEM', `Imported ${parsedRows.length} rows from ${result.name}`);
       }
@@ -112,29 +113,37 @@ export const UploadPage: React.FC = () => {
   const handleStartQC = async () => {
     if (!validationSummary || validationSummary.validRowsCount === 0) return;
 
+    setAnalysisPending(true);
     addLog('INFO', 'QC_ENGINE', `Preparing batch for ${validationSummary.validRowsCount} SKUs — checking Seawide session...`);
-    const sessionOk = await MockQCEngine.ensureBatchSession();
-    if (!sessionOk) {
-      addLog('ERROR', 'LOGIN', 'Batch start aborted: Seawide login session could not be established.');
-      return;
-    }
+    try {
+      const sessionOk = await QcEngine.ensureBatchSession();
+      if (!sessionOk) {
+        addLog('ERROR', 'LOGIN', 'Batch start aborted: Seawide login session could not be established.');
+        setAnalysisPending(false);
+        return;
+      }
 
-    startQC();
-    MockQCEngine.startLiveProcessing();
-    addLog('INFO', 'QC_ENGINE', `Starting Live QC Comparison batch for ${validationSummary.validRowsCount} SKUs.`);
-    navigate('/output');
+      startQC();
+      QcEngine.startLiveProcessing();
+      addLog('INFO', 'QC_ENGINE', `Starting Live QC Comparison batch for ${validationSummary.validRowsCount} SKUs.`);
+      navigate('/output');
+    } catch {
+      setAnalysisPending(false);
+    }
   };
 
   const handleClear = () => {
-    setRawInputText('');
+    setRawInputText(ValidatorService.getInputTemplate());
     setUploadedFileName(null);
     setValidationSummary(null);
   };
 
   const detectedRowCount = useMemo(
-    () => (rawInputText ? rawInputText.split('\n').filter(Boolean).length : 0),
-    [rawInputText]
+    () => ValidatorService.countDataRows(rawInputText),
+    [rawInputText],
   );
+
+  const hasDataRows = detectedRowCount > 0;
 
   return (
     <div className="h-full flex flex-col p-6 overflow-hidden">
@@ -148,7 +157,7 @@ export const UploadPage: React.FC = () => {
             </span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Provide SKU inventory feed to cross-compare Seawide catalog data with live Amazon listings.
+            Header is fixed — paste or type values only in the box below.
           </p>
         </div>
 
@@ -215,15 +224,14 @@ export const UploadPage: React.FC = () => {
             {activeTab === 'TEXT' ? (
               <div className="flex-1 flex flex-col min-h-0">
                 <div className="mb-2 flex items-center justify-between text-xs text-slate-500">
-                  <span>Required Columns: <strong>PART SKU | ASIN | Brand | Line | UPC</strong></span>
-                  <span>Paste rows directly from Excel / Google Sheets</span>
+                  <span><strong>ASIN · UPC · Vendor Model</strong> header is locked — add values below</span>
+                  <span>Paste from Excel works (header auto-removed)</span>
                 </div>
-                <textarea
+                <ProductValueInput
                   value={rawInputText}
-                  onChange={(e) => setRawInputText(e.target.value)}
-                  placeholder={`PART SKU\tASIN\tBrand\tLine\tUPC\nSKU-SWD-10492\tB0000AXN5U\tSierra Marine\tElectrical\t030999014923`}
-                  className="flex-1 w-full p-3 font-mono text-xs text-slate-800 bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 resize-none overflow-auto leading-relaxed"
-                  spellCheck={false}
+                  onChange={setRawInputText}
+                  placeholder={'B0000AXN5U\t686226806970\tPRM80697\nB07KM48P9X\t790444031103\tKIT04F-CZ6U51-06'}
+                  className="flex-1"
                 />
               </div>
             ) : (
@@ -289,15 +297,15 @@ export const UploadPage: React.FC = () => {
           {/* Action Footer */}
           <div className="p-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between shrink-0">
             <span className="text-xs text-slate-500 font-medium">
-              {rawInputText ? `${detectedRowCount} rows detected` : 'No data entered'}
+              {hasDataRows ? `${detectedRowCount} value row(s)` : 'Add values below the header'}
             </span>
 
             <div className="flex items-center space-x-3">
               <button
                 onClick={handleValidate}
-                disabled={!rawInputText.trim() || isValidating}
+                disabled={!hasDataRows || isValidating}
                 className={`flex items-center space-x-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all shadow-xs cursor-pointer ${
-                  !rawInputText.trim() || isValidating
+                  !hasDataRows || isValidating
                     ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
                     : 'bg-slate-900 hover:bg-black text-white'
                 }`}
@@ -347,9 +355,9 @@ export const UploadPage: React.FC = () => {
               <div className="flex items-center justify-between p-2.5 rounded-lg border border-slate-100 bg-slate-50/60 text-xs">
                 <div className="flex items-center space-x-2">
                   <span className={`w-2 h-2 rounded-full ${validationSummary ? 'bg-emerald-500' : 'bg-slate-300'}`} />
-                  <span className="font-semibold text-slate-700">1. Required Columns Present</span>
+                  <span className="font-semibold text-slate-700">1. Header Row Ready</span>
                 </div>
-                <span className="text-slate-500 font-mono text-[11px]">PART SKU, ASIN, Brand, Line, UPC</span>
+                    <span className="text-slate-500 font-mono text-[11px]">ASIN · UPC · VENDOR MODEL</span>
               </div>
 
               <div className="flex items-center justify-between p-2.5 rounded-lg border border-slate-100 bg-slate-50/60 text-xs">
@@ -410,19 +418,17 @@ export const UploadPage: React.FC = () => {
                     <table className="w-full text-left text-[11px]">
                       <thead className="bg-slate-100 text-slate-700 sticky top-0">
                         <tr>
-                          <th className="p-2 font-semibold">PART SKU</th>
                           <th className="p-2 font-semibold">ASIN</th>
-                          <th className="p-2 font-semibold">Brand</th>
                           <th className="p-2 font-semibold">UPC</th>
+                          <th className="p-2 font-semibold">VENDOR MODEL</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {validationSummary.validRows.slice(0, 10).map((r) => (
                           <tr key={r.id} className="hover:bg-slate-50">
-                            <td className="p-2 font-mono text-blue-700">{r.partSku}</td>
                             <td className="p-2 font-mono text-slate-900">{r.asin}</td>
-                            <td className="p-2 text-slate-600">{r.brand}</td>
                             <td className="p-2 font-mono text-slate-500">{r.upc}</td>
+                            <td className="p-2 font-mono text-blue-700">{r.vendorModel}</td>
                           </tr>
                         ))}
                       </tbody>

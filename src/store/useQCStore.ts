@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { RawInputRow, ValidationSummary, QCRowResult, QCExecutionState, QCRunMetrics, QCStatus } from '../types/qc';
+import { ValidatorService } from '../services/validatorService';
 
 interface QCStoreState {
   rawInputText: string;
@@ -19,6 +20,10 @@ interface QCStoreState {
   sandboxInputText: string;
   sandboxResult: QCRowResult | null;
   isSandboxRunning: boolean;
+  sandboxTrace: string[];
+  sandboxPushMessage: string | null;
+  /** True during session ensure / pre-flight before RUNNING or sandbox flag flips */
+  isAnalysisPending: boolean;
 
   // Selected result for detail drawer
   selectedResultId: string | null;
@@ -49,6 +54,9 @@ interface QCStoreState {
   setSandboxInputText: (text: string) => void;
   setSandboxResult: (result: QCRowResult | null) => void;
   setIsSandboxRunning: (running: boolean) => void;
+  setSandboxTrace: (lines: string[] | ((prev: string[]) => string[])) => void;
+  setSandboxPushMessage: (message: string | null) => void;
+  setAnalysisPending: (pending: boolean) => void;
   overrideSandboxStatus: (status: QCStatus) => void;
   pushSandboxToOutput: () => void;
   
@@ -59,7 +67,7 @@ interface QCStoreState {
 }
 
 export const useQCStore = create<QCStoreState>((set, get) => ({
-  rawInputText: '',
+  rawInputText: ValidatorService.getInputTemplate(),
   uploadedFileName: null,
   validationSummary: null,
   isValidating: false,
@@ -71,9 +79,12 @@ export const useQCStore = create<QCStoreState>((set, get) => ({
   startTime: null,
   elapsedSeconds: 0,
   
-  sandboxInputText: 'SKU-SWD-8849\tB07XQ94ABC\tSierra Marine\tElectrical\t030999884901',
+  sandboxInputText: 'B0000AXN5U\t686226806970\tPRM80697',
   sandboxResult: null,
   isSandboxRunning: false,
+  sandboxTrace: [],
+  sandboxPushMessage: null,
+  isAnalysisPending: false,
   
   selectedResultId: null,
   statusCounts: { passed: 0, failed: 0, manualReview: 0 },
@@ -127,12 +138,13 @@ export const useQCStore = create<QCStoreState>((set, get) => ({
       startTime: Date.now(),
       elapsedSeconds: 0,
       statusCounts: { passed: 0, failed: 0, manualReview: 0 },
+      isAnalysisPending: false,
     });
   },
   
-  pauseQC: () => set({ executionState: 'PAUSED' }),
-  resumeQC: () => set({ executionState: 'RUNNING' }),
-  stopQC: () => set({ executionState: 'STOPPED' }),
+  pauseQC: () => set({ executionState: 'PAUSED', isAnalysisPending: false }),
+  resumeQC: () => set({ executionState: 'RUNNING', isAnalysisPending: false }),
+  stopQC: () => set({ executionState: 'STOPPED', isAnalysisPending: false }),
   
   resetQC: () => set({
     queue: [],
@@ -142,11 +154,18 @@ export const useQCStore = create<QCStoreState>((set, get) => ({
     startTime: null,
     elapsedSeconds: 0,
     statusCounts: { passed: 0, failed: 0, manualReview: 0 },
+    isAnalysisPending: false,
   }),
   
   setSandboxInputText: (text) => set({ sandboxInputText: text }),
   setSandboxResult: (sandboxResult) => set({ sandboxResult }),
   setIsSandboxRunning: (isSandboxRunning) => set({ isSandboxRunning }),
+  setSandboxTrace: (lines) =>
+    set((state) => ({
+      sandboxTrace: typeof lines === 'function' ? lines(state.sandboxTrace) : lines,
+    })),
+  setSandboxPushMessage: (sandboxPushMessage) => set({ sandboxPushMessage }),
+  setAnalysisPending: (isAnalysisPending) => set({ isAnalysisPending }),
   
   overrideSandboxStatus: (status) => set((state) => {
     if (!state.sandboxResult) return state;

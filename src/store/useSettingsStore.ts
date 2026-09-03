@@ -10,7 +10,7 @@ interface SettingsStoreState {
 const DEFAULT_SETTINGS: AppSettings = {
   priceVarianceThreshold: 15,
   titleSimilarityThreshold: 70,
-  imageSimilarityThreshold: 70,
+  imageSimilarityThreshold: 50,
   reuseSession: true,
   headlessMode: true,
   strictPackQuantity: true,

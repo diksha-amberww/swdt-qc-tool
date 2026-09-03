@@ -52,6 +52,27 @@ export interface ElectronAPI {
   }) => Promise<EnsureVendorSessionResult>;
   getVendorSessionStatus?: () => Promise<VendorSessionStatus>;
   clearVendorSession?: () => Promise<boolean>;
+  scrapeVendorListing?: (payload: {
+    upc?: string;
+    vendorModel?: string;
+    asin?: string;
+  }) => Promise<unknown>;
+  fetchAmazonListing?: (payload: { asin: string }) => Promise<unknown>;
+  testAmazonConnection?: () => Promise<{
+    success: boolean;
+    message: string;
+    responseTimeMs: number;
+    endpoint: string;
+  }>;
+  evaluateQcRow?: (payload: {
+    row: { asin: string; upc: string; vendorModel: string };
+    settings: {
+      priceVarianceThreshold: number;
+      titleSimilarityThreshold: number;
+      imageSimilarityThreshold: number;
+      strictPackQuantity: boolean;
+    };
+  }) => Promise<import('../../scraping/qc/evaluateRow').QcEvaluateResult>;
 }
 
 declare global {

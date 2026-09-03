@@ -1,18 +1,17 @@
-import React, { memo } from 'react';
+import React, { memo, useState } from 'react';
 import {
   X,
   CheckCircle2,
   XCircle,
   AlertTriangle,
   ExternalLink,
-  DollarSign,
-  Package,
-  Layers,
   Sparkles,
   Barcode,
 } from 'lucide-react';
-import { QCRowResult, QCStatus } from '../../types/qc';
+import { QCRowResult, QCStatus, formatPackQty } from '../../types/qc';
 import { useQCStore } from '../../store/useQCStore';
+import { useSettingsStore } from '../../store/useSettingsStore';
+import { JsonCopyBlock } from '../ui/JsonCopyBlock';
 
 interface DetailModalProps {
   result: QCRowResult;
@@ -21,6 +20,8 @@ interface DetailModalProps {
 
 export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }) => {
   const updateResult = useQCStore((state) => state.updateResult);
+  const imageThreshold = useSettingsStore((state) => state.settings.imageSimilarityThreshold);
+  const [tab, setTab] = useState<'identity' | 'packaging' | 'attributes' | 'specs' | 'raw'>('identity');
 
   const handleManualOverride = (newStatus: QCStatus) => {
     updateResult(result.id, {
@@ -65,13 +66,13 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
             {getStatusBadge(result.status)}
             <div>
               <div className="flex items-center space-x-2">
-                <h3 className="text-base font-extrabold text-slate-900">{result.partSku}</h3>
+                <h3 className="text-base font-extrabold text-slate-900">{result.vendorModel || result.partSku}</h3>
                 <span className="text-xs text-slate-400">|</span>
                 <span className="text-xs font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
                   ASIN: {result.asin}
                 </span>
                 <span className="text-xs font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
-                  {result.brand} • {result.line}
+                  {result.brand || 'SeaWide'} • {result.upc}
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 mt-0.5">
@@ -126,62 +127,59 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2 text-indigo-900 font-extrabold text-xs">
                 <Sparkles className="w-4 h-4 text-indigo-600" />
-                <span>CLAUDE HAIKU 4.5 AI COMPARISON VERDICT</span>
+                <span>ENGINE COMPARISON VERDICT</span>
               </div>
               <span className="text-[11px] font-bold text-indigo-700 bg-white/80 px-2 py-0.5 rounded border border-indigo-200">
                 Confidence Score: {(result.confidenceScore * 100).toFixed(0)}%
               </span>
             </div>
             <p className="text-xs text-slate-700 leading-relaxed font-medium">
-              {result.aiVerdictReason}
+              {result.verdictSentence || result.aiVerdictReason}
             </p>
           </div>
 
           {/* Metric Comparison Gauges */}
           <div className="grid grid-cols-4 gap-3">
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-              <span className="text-[11px] font-bold text-slate-500 block mb-1">Title Match</span>
-              <div className="flex items-end justify-between">
-                <span className="text-lg font-black text-slate-900">{result.titleMatchPct}%</span>
-                <span className={`text-[11px] font-bold ${result.titleMatchPct >= 70 ? 'text-emerald-600' : 'text-red-600'}`}>
-                  {result.titleMatchPct >= 70 ? 'PASS (≥70%)' : 'FAIL (<70%)'}
-                </span>
-              </div>
-              <div className="w-full bg-slate-200 h-1.5 rounded-full mt-2 overflow-hidden">
-                <div
-                  className={`h-full ${result.titleMatchPct >= 70 ? 'bg-emerald-500' : 'bg-red-500'}`}
-                  style={{ width: `${result.titleMatchPct}%` }}
-                />
-              </div>
-            </div>
-
-            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-              <span className="text-[11px] font-bold text-slate-500 block mb-1">Price Variance</span>
+              <span className="text-[11px] font-bold text-slate-500 block mb-1">Title (AI)</span>
               <div className="flex items-end justify-between">
                 <span className="text-lg font-black text-slate-900">
-                  {result.priceVariancePct > 0 ? `+${result.priceVariancePct}%` : `${result.priceVariancePct}%`}
+                  {result.titleSameProduct == null ? '—' : result.titleSameProduct ? 'Same' : 'No'}
                 </span>
-                <span className={`text-[11px] font-bold ${Math.abs(result.priceVariancePct) <= 15 ? 'text-emerald-600' : 'text-red-600'}`}>
-                  {Math.abs(result.priceVariancePct) <= 15 ? 'PASS (±15%)' : 'ALERT'}
+                <span className={`text-[11px] font-bold ${result.titleSameProduct ? 'text-emerald-600' : 'text-amber-600'}`}>
+                  {result.titleMatchPct}% tokens
+                </span>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              <span className="text-[11px] font-bold text-slate-500 block mb-1">Image Similarity</span>
+              <div className="flex items-end justify-between">
+                <span className="text-lg font-black text-slate-900">{result.imageSimilarityPct}%</span>
+                <span className={`text-[11px] font-bold ${result.imageSimilarityPct >= imageThreshold ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {result.imageSimilarityPct >= imageThreshold ? `PASS (≥${imageThreshold}%)` : `BELOW ${imageThreshold}%`}
                 </span>
               </div>
               <div className="w-full bg-slate-200 h-1.5 rounded-full mt-2 overflow-hidden">
                 <div
-                  className={`h-full ${Math.abs(result.priceVariancePct) <= 15 ? 'bg-emerald-500' : 'bg-red-500'}`}
-                  style={{ width: `${Math.min(100, Math.abs(result.priceVariancePct) * 3)}%` }}
+                  className={`h-full ${result.imageSimilarityPct >= imageThreshold ? 'bg-emerald-500' : 'bg-red-500'}`}
+                  style={{ width: `${Math.min(100, result.imageSimilarityPct)}%` }}
                 />
               </div>
             </div>
 
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-              <span className="text-[11px] font-bold text-slate-500 block mb-1">Pack Quantity Match</span>
+              <span className="text-[11px] font-bold text-slate-500 block mb-1">Pack Quantity</span>
               <div className="flex items-end justify-between mt-1">
                 <span className="text-sm font-bold text-slate-900">
-                  {result.vendorListing.packQuantity} vs {result.amazonListing.packQuantity}
+                  {formatPackQty(result.vendorListing.packQuantity)} vs {formatPackQty(result.amazonListing.packQuantity)}
                 </span>
-                <span className={`text-[11px] font-bold ${result.packQtyMatch ? 'text-emerald-600' : 'text-red-600'}`}>
-                  {result.packQtyMatch ? 'MATCH' : 'MISMATCH'}
+                <span className={`text-[11px] font-bold ${result.packQtyMatch ? 'text-emerald-600' : result.packQtyMatch == null ? 'text-amber-600' : 'text-red-600'}`}>
+                  {result.packQtyMatch ? 'MATCH' : result.packQtyMatch == null ? 'UNKNOWN' : 'MISMATCH'}
                 </span>
+              </div>
+              <div className="text-[10px] text-slate-500 mt-1">
+                Case qty: {formatPackQty(result.vendorListing.caseQuantity)} vs {formatPackQty(result.amazonListing.caseQuantity)}
               </div>
             </div>
 
@@ -213,15 +211,23 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
               </div>
 
               <div className="flex items-start space-x-4">
-                <img
-                  src={result.vendorListing.imageUrl}
-                  alt={result.partSku}
-                  loading="lazy"
-                  decoding="async"
-                  width={96}
-                  height={96}
-                  className="w-24 h-24 object-cover rounded-lg border border-slate-200 bg-white shrink-0"
-                />
+                <a
+                  href={result.vendorListing.imageUrl || undefined}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0"
+                >
+                  <img
+                    src={result.vendorListing.imageUrl || undefined}
+                    alt={result.vendorModel || result.partSku}
+                    referrerPolicy="no-referrer"
+                    loading="lazy"
+                    decoding="async"
+                    width={96}
+                    height={96}
+                    className="w-24 h-24 object-contain rounded-lg border border-slate-200 bg-white"
+                  />
+                </a>
                 <div className="space-y-1.5 flex-1 min-w-0">
                   <h5 className="text-xs font-bold text-slate-900 leading-snug">
                     {result.vendorListing.title}
@@ -231,7 +237,10 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
                       ${result.vendorListing.price.toFixed(2)}
                     </span>
                     <span className="text-slate-500 font-medium">
-                      Pack Qty: <strong>{result.vendorListing.packQuantity}</strong>
+                    Pack Qty: <strong>{formatPackQty(result.vendorListing.packQuantity)}</strong>
+                    {result.vendorListing.caseQuantity != null && (
+                      <span className="ml-2">Case: {result.vendorListing.caseQuantity}</span>
+                    )}
                     </span>
                   </div>
                   <div className="text-[11px] text-slate-600 flex items-center space-x-1">
@@ -274,15 +283,23 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
               </div>
 
               <div className="flex items-start space-x-4">
-                <img
-                  src={result.amazonListing.imageUrl}
-                  alt={result.asin}
-                  loading="lazy"
-                  decoding="async"
-                  width={96}
-                  height={96}
-                  className="w-24 h-24 object-cover rounded-lg border border-slate-200 bg-white shrink-0"
-                />
+                <a
+                  href={result.amazonListing.imageUrl || undefined}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0"
+                >
+                  <img
+                    src={result.amazonListing.imageUrl || undefined}
+                    alt={result.asin}
+                    referrerPolicy="no-referrer"
+                    loading="lazy"
+                    decoding="async"
+                    width={96}
+                    height={96}
+                    className="w-24 h-24 object-contain rounded-lg border border-slate-200 bg-white"
+                  />
+                </a>
                 <div className="space-y-1.5 flex-1 min-w-0">
                   <h5 className="text-xs font-bold text-slate-900 leading-snug">
                     {result.amazonListing.title}
@@ -292,7 +309,10 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
                       ${result.amazonListing.price.toFixed(2)}
                     </span>
                     <span className="text-slate-500 font-medium">
-                      Pack Qty: <strong>{result.amazonListing.packQuantity}</strong>
+                    Pack Qty: <strong>{formatPackQty(result.amazonListing.packQuantity)}</strong>
+                    {result.amazonListing.caseQuantity != null && (
+                      <span className="ml-2">Case: {result.amazonListing.caseQuantity}</span>
+                    )}
                     </span>
                   </div>
                   <div className="text-[11px] text-slate-600 flex items-center space-x-1">
@@ -314,6 +334,119 @@ export const DetailModal: React.FC<DetailModalProps> = memo(({ result, onClose }
               </div>
             </div>
           </div>
+
+          <div className="flex items-center space-x-1 border-b border-slate-200">
+            {(['identity', 'packaging', 'attributes', 'specs', 'raw'] as const).map((id) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                className={`px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide cursor-pointer ${
+                  tab === id ? 'text-blue-700 border-b-2 border-blue-600' : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                {id}
+              </button>
+            ))}
+          </div>
+
+          {tab === 'identity' && (
+            <div className="grid grid-cols-2 gap-4 text-xs">
+              <div className="border border-slate-200 rounded-lg p-3 space-y-2">
+                <h4 className="font-bold mb-1">Vendor identity</h4>
+                <div className="flex justify-between"><span>Brand</span><strong>{result.vendorListing.brand || '—'}</strong></div>
+                <div className="flex justify-between"><span>Model</span><strong className="font-mono">{result.vendorListing.modelNumber || '—'}</strong></div>
+                <div className="flex justify-between"><span>UPC</span><strong className="font-mono">{result.vendorListing.upc || '—'}</strong></div>
+                <p className="text-slate-600 pt-1">{result.vendorListing.title || '—'}</p>
+              </div>
+              <div className="border border-slate-200 rounded-lg p-3 space-y-2">
+                <h4 className="font-bold mb-1">Amazon identity</h4>
+                <div className="flex justify-between"><span>Brand</span><strong>{result.amazonListing.brand || '—'}</strong></div>
+                <div className="flex justify-between"><span>Model</span><strong className="font-mono">{result.amazonListing.modelNumber || '—'}</strong></div>
+                <div className="flex justify-between"><span>UPC</span><strong className="font-mono">{result.amazonListing.upc || '—'}</strong></div>
+                <p className="text-slate-600 pt-1">{result.amazonListing.title || '—'}</p>
+              </div>
+              <div className="col-span-2 grid grid-cols-4 gap-2">
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
+                  Brand: <strong className={result.brandMatch ? 'text-emerald-700' : 'text-red-600'}>{result.brandMatch ? 'MATCH' : 'MISMATCH'}</strong>
+                </div>
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
+                  Model: <strong className={result.modelMatch ? 'text-emerald-700' : 'text-red-600'}>{result.modelMatch ? 'PARTIAL MATCH' : 'MISMATCH'}</strong>
+                </div>
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
+                  Specs: <strong>{result.specMatchPct}%</strong>
+                </div>
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-2">
+                  Description: <strong>{result.descriptionMatchPct}%</strong>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === 'packaging' && (
+            <div className="grid grid-cols-2 gap-4 text-xs">
+              <pre className="bg-slate-50 border border-slate-200 rounded-lg p-3 overflow-auto max-h-64">
+                {JSON.stringify(result.vendorListingFull?.normalized.packaging || result.comparisonPayload?.comparison.packaging.vendorPackaging || {}, null, 2)}
+              </pre>
+              <pre className="bg-slate-50 border border-slate-200 rounded-lg p-3 overflow-auto max-h-64">
+                {JSON.stringify(result.amazonListingFull?.normalized.packaging || result.comparisonPayload?.comparison.packaging.amazonPackaging || {}, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {tab === 'attributes' && (
+            <div className="grid grid-cols-2 gap-4 text-xs">
+              <div className="border border-slate-200 rounded-lg p-3 max-h-64 overflow-auto">
+                <h4 className="font-bold mb-2">Vendor attributes</h4>
+                <ul className="space-y-1">
+                  {(result.vendorListingFull?.raw.attributes || []).map((a) => (
+                    <li key={a.key}>
+                      <strong>{a.key}:</strong> {a.value}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="border border-slate-200 rounded-lg p-3 max-h-64 overflow-auto">
+                <h4 className="font-bold mb-2">Amazon attributes (flattened)</h4>
+                <ul className="space-y-1">
+                  {(result.amazonListingFull?.normalized.specifications.entries || []).slice(0, 40).map((a) => (
+                    <li key={a.key}>
+                      <strong>{a.key}:</strong> {a.value}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {tab === 'specs' && (
+            <div className="space-y-2 text-xs">
+              <p>
+                Specs match <strong>{result.specMatchPct}%</strong>
+                {' · '}
+                Description match <strong>{result.descriptionMatchPct}%</strong>
+              </p>
+              <pre className="bg-slate-50 border border-slate-200 rounded-lg p-3 overflow-auto max-h-72 text-[11px]">
+                {JSON.stringify(result.comparisonPayload?.comparison.specifications || {}, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {tab === 'raw' && (
+            <div className="grid grid-cols-2 gap-4">
+              <JsonCopyBlock
+                label="Seawide Vendor Object"
+                labelClassName="text-blue-700"
+                data={result.vendorListingFull}
+                className="max-h-80"
+              />
+              <JsonCopyBlock
+                label="Amazon SP-API Object"
+                labelClassName="text-amber-700"
+                data={result.amazonListingFull}
+                className="max-h-80"
+              />
+            </div>
+          )}
         </div>
 
         {/* Footer */}

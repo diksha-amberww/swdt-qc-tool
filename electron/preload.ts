@@ -43,6 +43,19 @@ const electronAPI = {
       reason?: string;
     }>,
   clearVendorSession: () => ipcRenderer.invoke('vendor:clearSession') as Promise<boolean>,
+  scrapeVendorListing: (payload: { upc?: string; vendorModel?: string; asin?: string }) =>
+    ipcRenderer.invoke('vendor:scrapeListing', payload),
+  fetchAmazonListing: (payload: { asin: string }) => ipcRenderer.invoke('amazon:fetchListing', payload),
+  testAmazonConnection: () => ipcRenderer.invoke('amazon:testConnection'),
+  evaluateQcRow: (payload: {
+    row: { asin: string; upc: string; vendorModel: string };
+    settings: {
+      priceVarianceThreshold: number;
+      titleSimilarityThreshold: number;
+      imageSimilarityThreshold: number;
+      strictPackQuantity: boolean;
+    };
+  }) => ipcRenderer.invoke('qc:evaluateRow', payload),
   onVendorLoginProgress: (callback: (progress: SeawideLoginProgress) => void) => {
     const listener = (_event: unknown, progress: SeawideLoginProgress) =>
       callback(progress);

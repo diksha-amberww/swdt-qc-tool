@@ -166,7 +166,7 @@ export const SettingsPage: React.FC = () => {
                 className="w-full accent-blue-600 cursor-pointer"
               />
               <p className="text-[11px] text-slate-500">
-                Minimum semantic NLP match percentage required to automatically mark listing titles as PASSED.
+                Token-overlap hint only. Title pass/fail is decided by Claude Haiku checking whether the two titles represent the same product, even with different wording.
               </p>
             </div>
 
@@ -187,7 +187,7 @@ export const SettingsPage: React.FC = () => {
                 className="w-full accent-blue-600 cursor-pointer"
               />
               <p className="text-[11px] text-slate-500">
-                Visual feature hash comparison threshold between catalog photo and Amazon main listing image.
+                Visual feature hash comparison threshold between catalog photo and Amazon main listing image. Default 50%.
               </p>
             </div>
 

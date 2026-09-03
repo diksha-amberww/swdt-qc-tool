@@ -1,4 +1,9 @@
 import { BrowserWindow, session } from 'electron';
+import {
+  CHROME_USER_AGENT,
+  configureStealthBrowserWindow,
+  simulateHumanActivity,
+} from './electronStealth';
 
 export const SEAWIDE_LOGIN_URL = 'https://www.seawideb2b.com/Login?returnUrl=%2f';
 export const SEAWIDE_HOME_URL = 'https://www.seawideb2b.com/';
@@ -19,8 +24,7 @@ export interface SeawideLoginResult {
   error?: string;
 }
 
-const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+const USER_AGENT = CHROME_USER_AGENT;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const randomDelay = (min: number, max: number) =>
@@ -142,7 +146,16 @@ const readPageState = async (
         hasSmartSearch: !!document.querySelector('.kao-smartsearch-component'),
         hasLoginForm: !!document.querySelector('#LoginForm'),
         errorMessage: errEl ? errEl.textContent.trim() : '',
-        incapsulaBlocked: !!document.querySelector('iframe#main-iframe') || /_Incapsula_Resource/i.test(document.body?.innerHTML || ''),
+        incapsulaBlocked: (() => {
+          const html = document.body?.innerHTML || '';
+          const hasLoginForm = !!document.querySelector('#LoginForm');
+          const hasIframe = !!document.querySelector(
+            'iframe#main-iframe, iframe[src*="Incapsula"], iframe[src*="incapsula"]',
+          );
+          if (hasIframe) return true;
+          if (!hasLoginForm && /_Incapsula_Resource|incapsula/i.test(html)) return true;
+          return false;
+        })(),
       };
     })();
   `);
@@ -162,23 +175,93 @@ const isAuthenticated = (state: Awaited<ReturnType<typeof readPageState>>): bool
   return false;
 };
 
-const waitForLoginFormReady = async (win: BrowserWindow, timeoutMs = 90000): Promise<boolean> => {
+const enableLoginFormFields = async (win: BrowserWindow): Promise<void> => {
+  await win.webContents.executeJavaScript(`
+    (() => {
+      for (const sel of ['#Username', '#Password', '#SignInButton']) {
+        const el = document.querySelector(sel);
+        if (el instanceof HTMLInputElement || el instanceof HTMLButtonElement) {
+          el.disabled = false;
+          el.removeAttribute('disabled');
+        }
+      }
+    })();
+  `).catch(() => {});
+};
+
+const isLoginFormInteractive = async (win: BrowserWindow): Promise<boolean> => {
+  return win.webContents.executeJavaScript(`
+    (() => {
+      const user = document.querySelector('#Username');
+      const pass = document.querySelector('#Password');
+      const btn = document.querySelector('#SignInButton');
+      return !!(user && pass && btn);
+    })();
+  `).catch(() => false);
+};
+
+const waitForLoginFormReady = async (win: BrowserWindow, timeoutMs = 120000): Promise<boolean> => {
   const start = Date.now();
+  let lastInteraction = 0;
+  let reloadAttempted = false;
+
   while (Date.now() - start < timeoutMs) {
     const state = await readPageState(win);
+
     if (state.incapsulaBlocked) {
+      if (Date.now() - lastInteraction > 2500) {
+        await simulateHumanActivity(win);
+        lastInteraction = Date.now();
+      }
       await sleep(1500);
       continue;
     }
-    const ready = await win.webContents.executeJavaScript(`
-      (() => {
-        const user = document.querySelector('#Username');
-        const pass = document.querySelector('#Password');
-        const btn = document.querySelector('#SignInButton');
-        return !!(user && pass && btn && !user.disabled && !pass.disabled && !btn.disabled);
-      })();
-    `).catch(() => false);
-    if (ready) return true;
+
+    const hasForm = await isLoginFormInteractive(win);
+    if (hasForm) {
+      const ready = await win.webContents.executeJavaScript(`
+        (() => {
+          const user = document.querySelector('#Username');
+          const pass = document.querySelector('#Password');
+          const btn = document.querySelector('#SignInButton');
+          return !!(user && pass && btn && !user.disabled && !pass.disabled && !btn.disabled);
+        })();
+      `).catch(() => false);
+
+      if (ready) return true;
+
+      // Imperva cleared but fields still disabled — enable them (common with hidden windows).
+      if (Date.now() - start > 4000) {
+        await enableLoginFormFields(win);
+        const enabled = await win.webContents.executeJavaScript(`
+          (() => {
+            const user = document.querySelector('#Username');
+            const pass = document.querySelector('#Password');
+            const btn = document.querySelector('#SignInButton');
+            return !!(user && pass && btn && !user.disabled && !pass.disabled && !btn.disabled);
+          })();
+        `).catch(() => false);
+        if (enabled) return true;
+      }
+    }
+
+    if (
+      !reloadAttempted &&
+      Date.now() - start > 45000 &&
+      state.onLoginPage &&
+      !state.incapsulaBlocked &&
+      !hasForm
+    ) {
+      reloadAttempted = true;
+      await win.webContents.reload();
+      await sleep(5000);
+      continue;
+    }
+
+    if (Date.now() - lastInteraction > 3500) {
+      await simulateHumanActivity(win);
+      lastInteraction = Date.now();
+    }
     await sleep(600);
   }
   return false;
@@ -237,7 +320,7 @@ export interface SeawideLoginBrowserOptions {
   partition?: string;
   /** Clear cookies/storage when the login window closes (default: true for one-off tests). */
   clearOnExit?: boolean;
-  /** Close the hidden browser window after login (default: true). */
+  /** Close the browser window after login (default: true). */
   closeWindowOnExit?: boolean;
 }
 
@@ -269,9 +352,10 @@ export async function checkSeawideSessionAuth(
         contextIsolation: true,
         sandbox: false,
         javascript: true,
+        backgroundThrottling: false,
       },
     });
-    win.webContents.setUserAgent(USER_AGENT);
+    configureStealthBrowserWindow(win);
     await win.loadURL(SEAWIDE_HOME_URL);
     await sleep(2500);
     await dismissCookieBanner(win);
@@ -339,9 +423,11 @@ export async function testSeawideLoginBrowser(
 
   try {
     loginWindow = new BrowserWindow({
-      show: false,
-      width: 1360,
-      height: 900,
+      show: true,
+      width: 1280,
+      height: 860,
+      autoHideMenuBar: true,
+      title: 'SeaWide B2B Login',
       webPreferences: {
         partition: partitionName,
         session: ses,
@@ -349,16 +435,18 @@ export async function testSeawideLoginBrowser(
         contextIsolation: true,
         sandbox: false,
         javascript: true,
+        backgroundThrottling: false,
       },
     });
-
-    loginWindow.webContents.setUserAgent(USER_AGENT);
+    configureStealthBrowserWindow(loginWindow);
+    loginWindow.focus();
 
     report('Opening Seawide B2B login page', loginUrl);
     await loginWindow.loadURL(loginUrl);
 
     report('Waiting for Imperva/portal security check to complete');
-    await randomDelay(3000, 5000);
+    await simulateHumanActivity(loginWindow);
+    await randomDelay(4000, 6000);
 
     await dismissCookieBanner(loginWindow);
     await randomDelay(1000, 1500);

@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { useQCStore } from '../store/useQCStore';
 import { useLogStore } from '../store/useLogStore';
-import { MockQCEngine } from '../services/mockQCEngine';
+import { QcEngine } from '../services/qcEngine';
 import { DetailModal } from '../components/output/DetailModal';
 import { ResultRow } from '../components/output/ResultRow';
 import { QCRowResult, QCStatus } from '../types/qc';
@@ -37,6 +37,7 @@ export const OutputPage: React.FC = () => {
   const resumeQC = useQCStore((s) => s.resumeQC);
   const stopQC = useQCStore((s) => s.stopQC);
   const resetQC = useQCStore((s) => s.resetQC);
+  const setAnalysisPending = useQCStore((s) => s.setAnalysisPending);
   const getMetrics = useQCStore((s) => s.getMetrics);
   const statusCounts = useQCStore((s) => s.statusCounts);
   const elapsedSeconds = useQCStore((s) => s.elapsedSeconds);
@@ -67,22 +68,28 @@ export const OutputPage: React.FC = () => {
       return;
     }
 
-    const sessionOk = await MockQCEngine.ensureBatchSession();
-    if (!sessionOk) {
-      addLog('ERROR', 'LOGIN', 'Cannot start batch: Seawide session not available.');
-      return;
-    }
+    setAnalysisPending(true);
+    try {
+      const sessionOk = await QcEngine.ensureBatchSession();
+      if (!sessionOk) {
+        addLog('ERROR', 'LOGIN', 'Cannot start batch: Seawide session not available.');
+        setAnalysisPending(false);
+        return;
+      }
 
-    startQC();
-    MockQCEngine.startLiveProcessing();
-    addLog('INFO', 'QC_ENGINE', 'Live QC comparison stream started.');
+      startQC();
+      QcEngine.startLiveProcessing();
+      addLog('INFO', 'QC_ENGINE', 'Live QC comparison stream started.');
+    } catch {
+      setAnalysisPending(false);
+    }
   };
 
   const handlePause = () => {
     setActiveBtnPressed('PAUSE');
     setTimeout(() => setActiveBtnPressed(null), 250);
     pauseQC();
-    MockQCEngine.stopProcessing();
+    QcEngine.stopProcessing();
     addLog('WARNING', 'QC_ENGINE', 'Live QC stream paused by operator.');
   };
 
@@ -90,22 +97,28 @@ export const OutputPage: React.FC = () => {
     setActiveBtnPressed('RESUME');
     setTimeout(() => setActiveBtnPressed(null), 250);
 
-    const sessionOk = await MockQCEngine.ensureBatchSession();
-    if (!sessionOk) {
-      addLog('ERROR', 'LOGIN', 'Cannot resume batch: Seawide session not available.');
-      return;
-    }
+    setAnalysisPending(true);
+    try {
+      const sessionOk = await QcEngine.ensureBatchSession();
+      if (!sessionOk) {
+        addLog('ERROR', 'LOGIN', 'Cannot resume batch: Seawide session not available.');
+        setAnalysisPending(false);
+        return;
+      }
 
-    resumeQC();
-    MockQCEngine.startLiveProcessing();
-    addLog('INFO', 'QC_ENGINE', 'Live QC stream resumed.');
+      resumeQC();
+      QcEngine.startLiveProcessing();
+      addLog('INFO', 'QC_ENGINE', 'Live QC stream resumed.');
+    } catch {
+      setAnalysisPending(false);
+    }
   };
 
   const handleStop = () => {
     setActiveBtnPressed('STOP');
     setTimeout(() => setActiveBtnPressed(null), 250);
     stopQC();
-    MockQCEngine.stopProcessing();
+    QcEngine.stopProcessing();
     addLog('ERROR', 'QC_ENGINE', 'Live QC stream stopped completely.');
   };
 
@@ -113,7 +126,7 @@ export const OutputPage: React.FC = () => {
     setActiveBtnPressed('RESET');
     setTimeout(() => setActiveBtnPressed(null), 250);
     stopQC();
-    MockQCEngine.stopProcessing();
+    QcEngine.stopProcessing();
     resetQC();
     setCurrentPage(1);
     addLog('INFO', 'SYSTEM', 'QC Results and queue state reset.');
@@ -125,13 +138,12 @@ export const OutputPage: React.FC = () => {
       if (statusFilter !== 'ALL' && r.status !== statusFilter) return false;
       if (deferredSearch.trim()) {
         const q = deferredSearch.toLowerCase();
-        const matchSku = r.partSku.toLowerCase().includes(q);
+        const matchModel = (r.vendorModel || r.partSku).toLowerCase().includes(q);
         const matchAsin = r.asin.toLowerCase().includes(q);
-        const matchBrand = r.brand.toLowerCase().includes(q);
-        const matchLine = r.line.toLowerCase().includes(q);
+        const matchBrand = (r.brand || '').toLowerCase().includes(q);
         const matchUpc = r.upc.toLowerCase().includes(q);
         const matchReason = r.aiVerdictReason.toLowerCase().includes(q);
-        if (!matchSku && !matchAsin && !matchBrand && !matchLine && !matchUpc && !matchReason) {
+        if (!matchModel && !matchAsin && !matchBrand && !matchUpc && !matchReason) {
           return false;
         }
       }
@@ -193,6 +205,7 @@ export const OutputPage: React.FC = () => {
             {isRunning ? (
               <button
                 onClick={handlePause}
+                data-analysis-control
                 className={`flex items-center space-x-1.5 px-4 py-2 rounded-lg text-xs font-black uppercase tracking-wider transition-all duration-150 cursor-pointer ${
                   activeBtnPressed === 'PAUSE'
                     ? 'scale-95 shadow-inner bg-amber-800 text-white'
@@ -208,6 +221,7 @@ export const OutputPage: React.FC = () => {
             {isPaused ? (
               <button
                 onClick={handleResume}
+                data-analysis-control
                 className={`flex items-center space-x-1.5 px-4 py-2 rounded-lg text-xs font-black uppercase tracking-wider transition-all duration-150 cursor-pointer ${
                   activeBtnPressed === 'RESUME'
                     ? 'scale-95 shadow-inner bg-emerald-800 text-white'
@@ -222,6 +236,7 @@ export const OutputPage: React.FC = () => {
             {/* Stop Button (active when running or paused) */}
             <button
               onClick={handleStop}
+              data-analysis-control
               disabled={executionState === 'IDLE' || executionState === 'STOPPED'}
               className={`flex items-center space-x-1.5 px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all duration-150 cursor-pointer ${
                 executionState === 'IDLE' || executionState === 'STOPPED'
@@ -405,14 +420,13 @@ export const OutputPage: React.FC = () => {
                 <thead className="bg-slate-100/80 text-slate-700 font-bold sticky top-0 border-b border-slate-200 shadow-xs backdrop-blur-xs">
                   <tr>
                     <th className="p-3">Status Verdict</th>
-                    <th className="p-3">PART SKU</th>
+                    <th className="p-3">VENDOR MODEL</th>
                     <th className="p-3">ASIN</th>
-                    <th className="p-3">Brand & Category</th>
-                    <th className="p-3 text-center">Title Match</th>
-                    <th className="p-3 text-center">Price Variance</th>
+                    <th className="p-3">Brand</th>
+                    <th className="p-3 text-center">Title (AI)</th>
                     <th className="p-3 text-center">Pack Qty</th>
                     <th className="p-3 text-center">UPC Match</th>
-                    <th className="p-3">AI Verdict Analysis</th>
+                    <th className="p-3">Verdict</th>
                     <th className="p-3 text-center">Actions</th>
                   </tr>
                 </thead>

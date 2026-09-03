@@ -1,10 +1,16 @@
+import type { AmazonListingJson } from '../../scraping/types/amazonListing';
+import type { VendorListingJson } from '../../scraping/types/vendorListing';
+import type { RowComparisonPayload } from '../../scraping/types/scrapeResult';
+
 export interface RawInputRow {
   id: string;
-  partSku: string;
   asin: string;
-  brand: string;
-  line: string;
   upc: string;
+  vendorModel: string;
+  /** @deprecated alias of vendorModel for older UI copy */
+  partSku: string;
+  brand?: string;
+  line?: string;
   rawLineNumber?: number;
 }
 
@@ -31,7 +37,8 @@ export type QCExecutionState = 'IDLE' | 'RUNNING' | 'PAUSED' | 'STOPPED' | 'COMP
 export interface ListingDetails {
   title: string;
   price: number;
-  packQuantity: number;
+  packQuantity: number | null;
+  caseQuantity: number | null;
   imageUrl: string;
   modelNumber: string;
   upc: string;
@@ -43,25 +50,31 @@ export interface ListingDetails {
 
 export interface QCRowResult {
   id: string;
+  vendorModel: string;
   partSku: string;
   asin: string;
   brand: string;
   line: string;
   upc: string;
-  
-  // Scraped / Retrieved listing details
+
   vendorListing: ListingDetails;
   amazonListing: ListingDetails;
-  
-  // Calculated comparison metrics
+  vendorListingFull?: VendorListingJson | null;
+  amazonListingFull?: AmazonListingJson | null;
+  comparisonPayload?: RowComparisonPayload | null;
+
   titleMatchPct: number;
   priceVariancePct: number;
   imageSimilarityPct: number;
-  packQtyMatch: boolean;
+  packQtyMatch: boolean | null;
   upcMatch: boolean;
   modelMatch: boolean;
-  
-  // AI & Verdict details
+  brandMatch: boolean;
+  specMatchPct: number;
+  descriptionMatchPct: number;
+  titleSameProduct: boolean | null;
+  verdictSentence: string;
+
   status: QCStatus;
   aiVerdictReason: string;
   aiTokensUsed: {
@@ -70,6 +83,7 @@ export interface QCRowResult {
   };
   confidenceScore: number;
   timestamp: string;
+  errors?: string[];
   manualOverride?: boolean;
   overrideNotes?: string;
 }
@@ -83,4 +97,8 @@ export interface QCRunMetrics {
   elapsedSeconds: number;
   speedSkuPerMin: number;
   estimatedSecondsRemaining: number;
+}
+
+export function formatPackQty(value: number | null | undefined): string {
+  return value == null ? '—' : String(value);
 }

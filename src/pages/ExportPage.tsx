@@ -202,14 +202,14 @@ export const ExportPage: React.FC = () => {
               <thead className="bg-slate-100 text-slate-700 font-semibold sticky top-0 border-b border-slate-200">
                 <tr>
                   <th className="p-2.5">Verdict</th>
-                  <th className="p-2.5">PART SKU</th>
+                  <th className="p-2.5">VENDOR MODEL</th>
                   <th className="p-2.5">ASIN</th>
                   <th className="p-2.5">Brand</th>
-                  <th className="p-2.5">Title Similarity</th>
+                  <th className="p-2.5">Title (AI tokens)</th>
                   <th className="p-2.5">Price (Vendor vs AMZ)</th>
                   <th className="p-2.5">Price Var %</th>
                   <th className="p-2.5">Pack Match</th>
-                  <th className="p-2.5">AI Reason Summary</th>
+                  <th className="p-2.5">Verdict</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -228,7 +228,7 @@ export const ExportPage: React.FC = () => {
                         {r.status}
                       </span>
                     </td>
-                    <td className="p-2.5 font-mono font-bold text-blue-700">{r.partSku}</td>
+                    <td className="p-2.5 font-mono font-bold text-blue-700">{r.vendorModel || r.partSku}</td>
                     <td className="p-2.5 font-mono text-slate-800">{r.asin}</td>
                     <td className="p-2.5 text-slate-600">{r.brand}</td>
                     <td className="p-2.5 font-bold text-slate-800">{r.titleMatchPct}%</td>
@@ -238,8 +238,8 @@ export const ExportPage: React.FC = () => {
                     <td className="p-2.5 font-bold text-slate-800">
                       {r.priceVariancePct > 0 ? `+${r.priceVariancePct}%` : `${r.priceVariancePct}%`}
                     </td>
-                    <td className="p-2.5 text-slate-600">{r.packQtyMatch ? 'Yes' : 'No'}</td>
-                    <td className="p-2.5 max-w-xs truncate text-slate-500 text-[11px]">{r.aiVerdictReason}</td>
+                    <td className="p-2.5 text-slate-600">{r.packQtyMatch == null ? '—' : r.packQtyMatch ? 'Yes' : 'No'}</td>
+                    <td className="p-2.5 max-w-xs truncate text-slate-500 text-[11px]">{r.verdictSentence || r.aiVerdictReason}</td>
                   </tr>
                 ))}
               </tbody>
