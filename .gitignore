@@ -31,3 +31,5 @@ coverage/
 .vite/
 
 exports/
+algorithm/
+docs/
